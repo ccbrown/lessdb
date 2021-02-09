@@ -22,7 +22,12 @@ pub struct Response<'a> {
 }
 
 #[derive(Serialize)]
+pub enum ErrorCode {
+    InternalError,
+}
+
+#[derive(Serialize)]
 pub enum ResponseBody<'a> {
-    Error { code: String },
+    Error { code: ErrorCode },
     GetResult { value: Option<&'a [u8]> },
 }
