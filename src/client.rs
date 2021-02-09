@@ -16,7 +16,7 @@ pub enum RequestBody<'a> {
 
 #[derive(Serialize)]
 pub struct Response<'a> {
-    pub id: u64,
+    pub request_id: u64,
 
     pub body: ResponseBody<'a>,
 }
