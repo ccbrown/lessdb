@@ -8,7 +8,7 @@ ElastiKV is a key-value store meant to be similar to DynamoDB in scale and robus
 * Large Capacity: The store can grow to petabytes in size without significant slowdown.
 * Transactions: Writes to multiple keys can be done with strong consistency and all-or-nothing conditionals.
 * Low Latency: Speeds are typically closer to Redis than to DynamoDB.
-* High Availability: An availability zone will cause no disruption to service.
+* High Availability: An availability zone outage will cause no disruption to service.
 * Simple: The code is minimal enough to be quickly reviewed and understood by anyone with Rust familiarity.
 
 ## Design
