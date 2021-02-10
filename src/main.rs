@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{App, Arg};
 
 mod append_only_file;
+mod b_tree;
 mod client;
 mod node;
 mod partition;
