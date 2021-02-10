@@ -4,8 +4,13 @@ version = "0.1.0"
 authors = ["Christopher Brown <ccbrown112@gmail.com>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 clap = "2.33.3"
 serde = { version = "1.0.123", features = ["derive"] }
+anyhow = "1.0.38"
+byteorder = "1.4.2"
+crc32fast = "1.2.1"
+thiserror = "1.0.23"
+
+[dev-dependencies]
+tempdir = "0.3.7"

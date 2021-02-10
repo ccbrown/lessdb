@@ -2,7 +2,7 @@
 
 ElastiKV is a key-value store meant to be similar to DynamoDB in scale and robustness, but with significantly higher performance.
 
-## Features
+## Goals
 
 * Redundant Storage: All data is replicated at least 3 times across distinct data centers.
 * Large Capacity: The store can grow to petabytes in size without significant slowdown.
@@ -62,9 +62,5 @@ will own about 1000 partitions and require about 15TB of storage. At this scale,
 bringing new nodes into the cluster would take considerable time, but requests
 should remain nearly as fast as any other scale cluster.
 
-### Partition Table
-
-Each node in the cluster is capable of receiving requests. In order to know
-where to route those requests, the nodes maintain a copy of the partition
-table. This table is used to look up the addresses of the nodes that contain
-the partitions required to fulfil the request.
+Partitions consist of append-only B+trees where each modification appends a new
+root node to the partition.
