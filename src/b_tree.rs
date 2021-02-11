@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 const MAX_NODE_CHILDREN: usize = 6;
 
+#[derive(Debug)]
 pub enum Tree<K: Clone, V> {
     Persisted { id: u64 },
     Volatile { node: Arc<Node<K, V>> },
@@ -25,6 +26,7 @@ impl<K: Clone, V> Clone for Tree<K, V> {
     }
 }
 
+#[derive(Debug)]
 pub enum Value<V> {
     Persisted { id: u64 },
     Volatile { value: Arc<V> },
@@ -50,6 +52,7 @@ impl<V> Clone for Value<V> {
     }
 }
 
+#[derive(Debug)]
 pub enum Node<K: Clone, V> {
     Internal {
         index: Vec<K>,
@@ -116,7 +119,7 @@ pub trait Loader<K: Clone, V> {
     fn load_value(&self, id: u64) -> Result<Arc<V>, Self::Error>;
 }
 
-impl<K: PartialEq + PartialOrd + Ord + Clone, V> Tree<K, V> {
+impl<K: Ord + Clone, V> Tree<K, V> {
     /// Creates a new, empty B-tree.
     pub fn new() -> Self {
         Self::Volatile {
@@ -151,7 +154,7 @@ impl<K: PartialEq + PartialOrd + Ord + Clone, V> Tree<K, V> {
         loader: &L,
         key: K,
         value: V,
-    ) -> Result<Tree<K, V>, E> {
+    ) -> Result<Self, E> {
         Ok(
             match self.insert_impl(loader, key, value)?.split_if_overflow() {
                 (a, None) => Tree::Volatile { node: Arc::new(a) },
@@ -176,13 +179,13 @@ impl<K: PartialEq + PartialOrd + Ord + Clone, V> Tree<K, V> {
     ) -> Result<Node<K, V>, E> {
         Ok(match &*self.load_node(loader)? {
             Node::Internal { index, children } => {
-                let (index_idx, child_idx) = match index.binary_search(&key) {
-                    Ok(i) => (i, i + 1),
-                    Err(i) => (i, i),
+                let i = match index.binary_search(&key) {
+                    Ok(i) => i + 1,
+                    Err(i) => i,
                 };
                 let mut new_children = Vec::with_capacity(children.len() + 1);
-                new_children.clone_from_slice(&children[..child_idx]);
-                let new_index = match children[child_idx]
+                new_children.extend_from_slice(&children[..i]);
+                let new_index = match children[i]
                     .insert_impl(loader, key, value)?
                     .split_if_overflow()
                 {
@@ -192,15 +195,15 @@ impl<K: PartialEq + PartialOrd + Ord + Clone, V> Tree<K, V> {
                     }
                     (a, Some((b_key, b))) => {
                         let mut new_index = Vec::with_capacity(index.len() + 1);
-                        new_index.extend_from_slice(&index[..index_idx + 1]);
+                        new_index.extend_from_slice(&index[..i]);
                         new_index.push(b_key);
-                        new_index.extend_from_slice(&index[index_idx + 1..]);
+                        new_index.extend_from_slice(&index[i..]);
                         new_children.push(Tree::Volatile { node: Arc::new(a) });
                         new_children.push(Tree::Volatile { node: Arc::new(b) });
                         new_index
                     }
                 };
-                new_children.clone_from_slice(&children[child_idx + 1..]);
+                new_children.extend_from_slice(&children[i + 1..]);
                 Node::Internal {
                     index: new_index,
                     children: new_children,
@@ -244,25 +247,39 @@ mod tests {
         type Error = anyhow::Error;
 
         fn load_node(&self, id: u64) -> Result<Arc<Node<i32, String>>, Self::Error> {
-            unimplemented!()
+            panic!("the tests don't persist nodes")
         }
 
         fn load_value(&self, id: u64) -> Result<Arc<String>, Self::Error> {
-            unimplemented!()
+            panic!("the tests don't persist values")
         }
     }
 
     #[test]
-    fn test_b_tree() {
+    fn test_tree() {
         let storage = Storage;
 
-        let root = Tree::<i32, String>::new();
+        let mut root = Tree::<i32, String>::new();
         assert_eq!(root.get(&storage, &1).unwrap(), None);
 
-        for i in 0..100 {
-            let v = i.to_string();
-            let root = root.insert(&storage, i, v.clone()).unwrap();
-            assert_eq!(root.get(&storage, &i).unwrap(), Some(Arc::new(v)));
+        for i in 0..20 {
+            // test inserting the value
+            root = root.insert(&storage, i, (-1).to_string()).unwrap();
+            for j in 0..=i {
+                assert_eq!(
+                    root.get(&storage, &j).unwrap(),
+                    Some(Arc::new((if i == j { -1 } else { j }).to_string()))
+                );
+            }
+
+            // test updating the value
+            root = root.insert(&storage, i, i.to_string()).unwrap();
+            for j in 0..=i {
+                assert_eq!(
+                    root.get(&storage, &j).unwrap(),
+                    Some(Arc::new(j.to_string()))
+                );
+            }
         }
     }
 }

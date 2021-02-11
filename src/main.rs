@@ -3,6 +3,7 @@ use clap::{App, Arg};
 
 mod append_only_file;
 mod b_tree;
+mod b_tree_2d;
 mod client;
 mod node;
 mod partition;
