@@ -8,7 +8,7 @@ pub enum Tree<K: Clone, V: Clone> {
 }
 
 impl<K: Clone, V: Clone> Tree<K, V> {
-    fn load_node<E, L: Loader<K, V, Error = E>>(&self, loader: &L) -> Result<Node<K, V>, E> {
+    fn load_node<E, L: Loader<K, V, Error = E>>(&self, loader: &mut L) -> Result<Node<K, V>, E> {
         match self {
             Self::Persisted { id } => loader.load_node(*id),
             Self::Volatile { node, .. } => Ok(node.clone()),
@@ -23,7 +23,7 @@ pub enum Value<V> {
 }
 
 impl<V: Clone> Value<V> {
-    pub fn load<E, K: Clone, L: Loader<K, V, Error = E>>(self, loader: &L) -> Result<V, E> {
+    pub fn load<E, K: Clone, L: Loader<K, V, Error = E>>(self, loader: &mut L) -> Result<V, E> {
         match self {
             Self::Persisted { id } => loader.load_value(id),
             Self::Volatile { value, .. } => Ok(value),
@@ -125,8 +125,8 @@ impl<K: Clone, V: Clone> Node<K, V> {
 pub trait Loader<K: Clone, V: Clone> {
     type Error;
 
-    fn load_node(&self, id: u64) -> Result<Node<K, V>, Self::Error>;
-    fn load_value(&self, id: u64) -> Result<V, Self::Error>;
+    fn load_node(&mut self, id: u64) -> Result<Node<K, V>, Self::Error>;
+    fn load_value(&mut self, id: u64) -> Result<V, Self::Error>;
 }
 
 struct Deletion<K: Clone, V: Clone> {
@@ -147,7 +147,11 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     }
 
     /// Gets an item from the B-tree, if it exists.
-    pub fn get<E, L: Loader<K, V, Error = E>>(&self, loader: &L, key: &K) -> Result<Option<V>, E> {
+    pub fn get<E, L: Loader<K, V, Error = E>>(
+        &self,
+        loader: &mut L,
+        key: &K,
+    ) -> Result<Option<V>, E> {
         match self.load_node(loader)? {
             Node::Internal { index, children } => match index.binary_search(&key) {
                 Ok(i) => children[i + 1].get(loader, key),
@@ -163,7 +167,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     /// Inserts a new item into the B-tree or updates an existing one. If the item existed, its previous value is returned.
     pub fn insert<E, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &L,
+        loader: &mut L,
         key: K,
         value: V,
     ) -> Result<(Self, Option<Value<V>>), E> {
@@ -184,7 +188,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
 
     fn insert_impl<E, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &L,
+        loader: &mut L,
         key: K,
         value: V,
     ) -> Result<(Node<K, V>, Option<Value<V>>), E> {
@@ -241,7 +245,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     /// Deletes an item from the B-tree. If the item existed, its previous value is returned.
     pub fn delete<E, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &L,
+        loader: &mut L,
         key: &K,
     ) -> Result<(Self, Option<Value<V>>), E> {
         Ok(match self.delete_impl(loader, key)? {
@@ -262,7 +266,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
 
     fn delete_impl<E, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &L,
+        loader: &mut L,
         key: &K,
     ) -> Result<Option<Deletion<K, V>>, E> {
         Ok(match self.load_node(loader)? {
@@ -358,14 +362,17 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     }
 
     #[cfg(test)]
-    pub fn assert_invariants<E: std::fmt::Debug, L: Loader<K, V, Error = E>>(&self, loader: &L) {
+    pub fn assert_invariants<E: std::fmt::Debug, L: Loader<K, V, Error = E>>(
+        &self,
+        loader: &mut L,
+    ) {
         self.assert_invariants_impl(loader, true)
     }
 
     #[cfg(test)]
     pub fn assert_invariants_impl<E: std::fmt::Debug, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &L,
+        loader: &mut L,
         is_root: bool,
     ) {
         match self.load_node(loader).unwrap() {
@@ -402,58 +409,58 @@ mod tests {
     impl Loader<i32, String> for Storage {
         type Error = anyhow::Error;
 
-        fn load_node(&self, id: u64) -> Result<Node<i32, String>, Self::Error> {
+        fn load_node(&mut self, id: u64) -> Result<Node<i32, String>, Self::Error> {
             panic!("the tests don't persist nodes")
         }
 
-        fn load_value(&self, id: u64) -> Result<String, Self::Error> {
+        fn load_value(&mut self, id: u64) -> Result<String, Self::Error> {
             panic!("the tests don't persist values")
         }
     }
 
     #[test]
     fn test_tree() {
-        let storage = Storage;
+        let mut storage = Storage;
 
         let mut root = Tree::<i32, String>::new();
-        assert_eq!(root.get(&storage, &1).unwrap(), None);
+        assert_eq!(root.get(&mut storage, &1).unwrap(), None);
 
         // insert some arbitrary values
         for i in (100..900).step_by(10) {
-            let (new_root, prev) = root.insert(&storage, i, i.to_string()).unwrap();
+            let (new_root, prev) = root.insert(&mut storage, i, i.to_string()).unwrap();
             root = new_root;
             assert_eq!(prev.is_none(), true);
-            root.assert_invariants(&storage);
+            root.assert_invariants(&mut storage);
         }
 
         for i in (0..1000).step_by(9) {
             // test inserting the value
-            let (new_root, _) = root.insert(&storage, i, "-1".to_string()).unwrap();
+            let (new_root, _) = root.insert(&mut storage, i, "-1".to_string()).unwrap();
             root = new_root;
-            root.assert_invariants(&storage);
-            assert_eq!(root.get(&storage, &i).unwrap(), Some("-1".to_string()));
+            root.assert_invariants(&mut storage);
+            assert_eq!(root.get(&mut storage, &i).unwrap(), Some("-1".to_string()));
 
             // test updating the value
-            let (new_root, prev) = root.insert(&storage, i, i.to_string()).unwrap();
+            let (new_root, prev) = root.insert(&mut storage, i, i.to_string()).unwrap();
             root = new_root;
-            root.assert_invariants(&storage);
+            root.assert_invariants(&mut storage);
             assert_eq!(
                 prev,
                 Some(Value::Volatile {
                     value: "-1".to_string()
                 })
             );
-            assert_eq!(root.get(&storage, &i).unwrap(), Some(i.to_string()));
+            assert_eq!(root.get(&mut storage, &i).unwrap(), Some(i.to_string()));
         }
 
         // test deleting values
         for i in (0..1000).step_by(3) {
-            let (root, prev) = root.delete(&storage, &i).unwrap();
+            let (root, prev) = root.delete(&mut storage, &i).unwrap();
             if i % 9 == 0 {
                 assert_eq!(prev.is_some(), true);
             }
-            root.assert_invariants(&storage);
-            assert_eq!(root.get(&storage, &i).unwrap(), None);
+            root.assert_invariants(&mut storage);
+            assert_eq!(root.get(&mut storage, &i).unwrap(), None);
         }
     }
 }

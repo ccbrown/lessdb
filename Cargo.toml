@@ -6,11 +6,12 @@ edition = "2018"
 
 [dependencies]
 clap = "2.33.3"
-serde = { version = "1.0.123", features = ["derive"] }
+serde = { version = "1.0.123", features = ["derive", "rc"] }
 anyhow = "1.0.38"
 byteorder = "1.4.2"
 crc32fast = "1.2.1"
 thiserror = "1.0.23"
+rmp-serde = "0.15.4"
 
 [dev-dependencies]
 tempdir = "0.3.7"
