@@ -12,19 +12,49 @@ use std::{
     sync::Arc,
 };
 
+pub const HASH_LENGTH: usize = 32;
+
+#[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hash(Arc<[u8; HASH_LENGTH]>);
+
+impl AsRef<[u8; HASH_LENGTH]> for Hash {
+    fn as_ref(&self) -> &[u8; HASH_LENGTH] {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl From<&str> for Hash {
+    fn from(s: &str) -> Hash {
+        use digest::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(s.as_bytes());
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(&hasher.finalize());
+        Hash(Arc::new(buf))
+    }
+}
+
 #[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bytes(Arc<Vec<u8>>);
 
+impl Bytes {
+    pub fn new() -> Self {
+        Self(Arc::new(Vec::new()))
+    }
+}
+
+#[cfg(test)]
 impl From<&str> for Bytes {
     fn from(s: &str) -> Bytes {
         Bytes(Arc::new(s.as_bytes().to_vec()))
     }
 }
 
-type BTree2D = b_tree_2d::Tree<Bytes, Bytes, Bytes>;
+type BTree2D = b_tree_2d::Tree<Hash, Bytes, Bytes>;
 
-pub type Key = b_tree_2d::Key<Bytes, Bytes>;
-pub type PrimaryKey = b_tree_2d::PrimaryKey<Bytes, Bytes>;
+pub type Key = b_tree_2d::Key<Hash, Bytes>;
+pub type PrimaryKey = b_tree_2d::PrimaryKey<Hash, Bytes>;
 
 pub struct Partition {
     f: AppendOnlyFile,
@@ -91,13 +121,13 @@ impl<'a> Tree<'a> {
 
 struct Loader<'a>(&'a mut AppendOnlyFile);
 
-impl<'a> b_tree_2d::Loader<Bytes, Bytes, Bytes> for Loader<'a> {
+impl<'a> b_tree_2d::Loader<Hash, Bytes, Bytes> for Loader<'a> {
     type Error = Error;
 
     fn load_primary_node(
         &mut self,
         id: u64,
-    ) -> Result<b_tree_2d::PrimaryNode<Bytes, Bytes, Bytes>, Self::Error> {
+    ) -> Result<b_tree_2d::PrimaryNode<Hash, Bytes, Bytes>, Self::Error> {
         self.0
             .seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to primary node")?;
@@ -109,7 +139,7 @@ impl<'a> b_tree_2d::Loader<Bytes, Bytes, Bytes> for Loader<'a> {
     fn load_secondary_node(
         &mut self,
         id: u64,
-    ) -> Result<b_tree_2d::SecondaryNode<Bytes, Bytes, Bytes>, Self::Error> {
+    ) -> Result<b_tree_2d::SecondaryNode<Hash, Bytes, Bytes>, Self::Error> {
         self.0
             .seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to secondary node")?;
