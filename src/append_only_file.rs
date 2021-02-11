@@ -10,6 +10,7 @@ use thiserror::Error;
 pub struct AppendOnlyFile {
     f: File,
     size: u64,
+    last_entry: Option<Entry>,
 }
 
 #[derive(Error, Debug)]
@@ -35,24 +36,34 @@ impl AppendOnlyFile {
             .read(true)
             .open(path)?;
         let size = f.seek(SeekFrom::End(0))?;
-        let mut ret = Self { f, size };
+        let mut ret = Self {
+            f,
+            size,
+            last_entry: None,
+        };
+        let mut last_entry = None;
         for entry in ret.entries() {
-            entry?;
+            last_entry = Some(entry?);
         }
+        ret.last_entry = last_entry;
         Ok(ret)
     }
 
     /// Moves the cursor to the end of the verified portion of the file and writes an entry to it.
-    pub fn append(&mut self, data: &[u8]) -> Result<()> {
+    pub fn append(&mut self, data: Vec<u8>) -> Result<()> {
         let len = u32::try_from(data.len()).with_context(|| "unsupported data length")?;
         self.f.seek(SeekFrom::Start(self.size))?;
         self.f.write_all(&len.to_be_bytes())?;
         let mut crc = crc32fast::Hasher::new();
-        crc.update(data);
+        crc.update(&data);
         self.f.write_all(&crc.finalize().to_be_bytes())?;
-        self.f.write_all(data)?;
+        self.f.write_all(&data)?;
         self.f.sync_data()?;
-        self.size += (ENTRY_PREFIX_LENGTH + data.len()) as u64;
+        self.last_entry = Some(Entry {
+            offset: self.size,
+            data,
+        });
+        self.size += ENTRY_PREFIX_LENGTH as u64 + len as u64;
         Ok(())
     }
 
@@ -90,6 +101,11 @@ impl AppendOnlyFile {
     /// entry will be written to this offset plus ENTRY_PREFIX_LENGTH.
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Returns the last entry in the file, if any.
+    pub fn last_entry(&self) -> Option<&Entry> {
+        self.last_entry.as_ref()
     }
 }
 
@@ -171,8 +187,15 @@ mod tests {
         // create the file and add some entries
         {
             let mut f = AppendOnlyFile::open(&path).unwrap();
-            f.append("foo".as_bytes()).unwrap();
-            f.append("bar".as_bytes()).unwrap();
+            f.append("foo".as_bytes().to_vec()).unwrap();
+            f.append("bar".as_bytes().to_vec()).unwrap();
+            assert_eq!(
+                f.last_entry(),
+                Some(&Entry {
+                    offset: 11,
+                    data: "bar".as_bytes().to_vec(),
+                })
+            );
 
             assert_eq!(
                 f.entries().collect::<Result<Vec<_>>>().unwrap(),
@@ -184,6 +207,13 @@ mod tests {
         // verify that everything looks fine after re-opening the file
         {
             let mut f = AppendOnlyFile::open(&path).unwrap();
+            assert_eq!(
+                f.last_entry(),
+                Some(&Entry {
+                    offset: 11,
+                    data: "bar".as_bytes().to_vec(),
+                })
+            );
 
             assert_eq!(
                 f.entries().collect::<Result<Vec<_>>>().unwrap(),
