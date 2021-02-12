@@ -1,2 +1,3 @@
 /data*
 /target
+/src/protos/client.rs

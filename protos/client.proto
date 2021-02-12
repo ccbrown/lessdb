@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+message Value {
+    oneof value {
+        bytes bytes = 1;
+        sint64 int = 2;
+    }
+}
+
+message Request {
+    oneof body {
+        GetOperation get = 1;
+        SetOperation set = 2;
+        DeleteOperation delete = 3;
+        IncrementOperation increment = 4;
+    }
+}
+
+message GetOperation {
+    bytes key = 1;
+}
+
+message DeleteOperation {
+    bytes key = 1;
+}
+
+message SetOperation {
+    message Condition {
+        oneof value {
+            bool exists = 1;
+            Value equals = 2;
+        }
+    }
+
+    bytes key = 1;
+    Value value = 2;
+    Condition condition = 3;
+}
+
+message IncrementOperation {
+    bytes key = 1;
+    sint64 amount = 2;
+}
+
+message Response {
+    oneof body {
+        Error error = 1;
+        GetResult get = 2;
+        SetResult set = 3;
+        DeleteResult delete = 4;
+        IncrementResult increment = 5;
+    }
+}
+
+message Error {
+    enum Code {
+        INTERNAL = 0;
+    }
+
+    Code code = 1;
+}
+
+message GetResult {
+    Value value = 1;
+}
+
+message DeleteResult {
+    bool did_delete = 1;
+}
+
+message SetResult {
+    bool did_set = 1;
+}
+
+message IncrementResult {
+    sint64 new_value = 1;
+}

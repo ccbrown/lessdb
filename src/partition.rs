@@ -4,21 +4,37 @@ use super::{
     b_tree_2d,
 };
 use anyhow::{Context, Error, Result};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
-    convert::TryInto,
+    convert::{TryFrom, TryInto},
     io::{Read, Seek, SeekFrom},
     path::Path,
-    sync::Arc,
 };
 
 pub const HASH_LENGTH: usize = 32;
 
 #[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hash(Arc<[u8; HASH_LENGTH]>);
+pub struct Hash(Bytes);
 
-impl AsRef<[u8; HASH_LENGTH]> for Hash {
-    fn as_ref(&self) -> &[u8; HASH_LENGTH] {
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("incorrect hash length")]
+pub struct IncorrectHashLength;
+
+impl TryFrom<Bytes> for Hash {
+    type Error = IncorrectHashLength;
+
+    fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
+        if bytes.len() != HASH_LENGTH {
+            Err(IncorrectHashLength)
+        } else {
+            Ok(Self(bytes))
+        }
+    }
+}
+
+impl AsRef<[u8]> for Hash {
+    fn as_ref(&self) -> &[u8] {
         &self.0
     }
 }
@@ -29,29 +45,17 @@ impl From<&str> for Hash {
         use digest::Digest;
         let mut hasher = sha2::Sha256::new();
         hasher.update(s.as_bytes());
-        let mut buf = [0u8; 32];
-        buf.copy_from_slice(&hasher.finalize());
-        Hash(Arc::new(buf))
+        Hash(hasher.finalize().to_vec().into())
     }
 }
 
 #[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Bytes(Arc<Vec<u8>>);
-
-impl Bytes {
-    pub fn new() -> Self {
-        Self(Arc::new(Vec::new()))
-    }
+pub enum Value {
+    Bytes(Bytes),
+    Int(i64),
 }
 
-#[cfg(test)]
-impl From<&str> for Bytes {
-    fn from(s: &str) -> Bytes {
-        Bytes(Arc::new(s.as_bytes().to_vec()))
-    }
-}
-
-type BTree2D = b_tree_2d::Tree<Hash, Bytes, Bytes>;
+type BTree2D = b_tree_2d::Tree<Hash, Bytes, Value>;
 
 pub type Key = b_tree_2d::Key<Hash, Bytes>;
 pub type PrimaryKey = b_tree_2d::PrimaryKey<Hash, Bytes>;
@@ -98,11 +102,15 @@ impl<'a> Tree<'a> {
         self.inner
     }
 
-    pub fn get(&mut self, key: &PrimaryKey) -> Result<Option<Bytes>> {
+    pub fn get(&mut self, key: &PrimaryKey) -> Result<Option<Value>> {
         Ok(self.inner.get(&mut self.loader, key)?)
     }
 
-    pub fn insert(self, key: Key, value: Bytes) -> Result<Self> {
+    pub fn insert<F: FnOnce(Option<&Value>) -> Option<Value>>(
+        self,
+        key: Key,
+        value: F,
+    ) -> Result<Self> {
         let mut loader = self.loader;
         Ok(Self {
             inner: self.inner.insert(&mut loader, key, value)?,
@@ -110,24 +118,22 @@ impl<'a> Tree<'a> {
         })
     }
 
-    pub fn delete(self, key: &PrimaryKey) -> Result<Self> {
+    pub fn delete(self, key: &PrimaryKey) -> Result<(Self, Option<Value>)> {
         let mut loader = self.loader;
-        Ok(Self {
-            inner: self.inner.delete(&mut loader, key)?,
-            loader,
-        })
+        let (inner, prev) = self.inner.delete(&mut loader, key)?;
+        Ok((Self { inner, loader }, prev))
     }
 }
 
 struct Loader<'a>(&'a mut AppendOnlyFile);
 
-impl<'a> b_tree_2d::Loader<Hash, Bytes, Bytes> for Loader<'a> {
+impl<'a> b_tree_2d::Loader<Hash, Bytes, Value> for Loader<'a> {
     type Error = Error;
 
     fn load_primary_node(
         &mut self,
         id: u64,
-    ) -> Result<b_tree_2d::PrimaryNode<Hash, Bytes, Bytes>, Self::Error> {
+    ) -> Result<b_tree_2d::PrimaryNode<Hash, Bytes, Value>, Self::Error> {
         self.0
             .seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to primary node")?;
@@ -139,7 +145,7 @@ impl<'a> b_tree_2d::Loader<Hash, Bytes, Bytes> for Loader<'a> {
     fn load_secondary_node(
         &mut self,
         id: u64,
-    ) -> Result<b_tree_2d::SecondaryNode<Hash, Bytes, Bytes>, Self::Error> {
+    ) -> Result<b_tree_2d::SecondaryNode<Hash, Bytes, Value>, Self::Error> {
         self.0
             .seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to secondary node")?;
@@ -148,7 +154,7 @@ impl<'a> b_tree_2d::Loader<Hash, Bytes, Bytes> for Loader<'a> {
         Ok(node.into())
     }
 
-    fn load_value(&mut self, id: u64) -> Result<b_tree_2d::Value<Bytes, Bytes>, Self::Error> {
+    fn load_value(&mut self, id: u64) -> Result<b_tree_2d::Value<Bytes, Value>, Self::Error> {
         self.0
             .seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to value")?;
@@ -190,6 +196,7 @@ impl Partition {
     }
 
     fn serialize_tree(tree: BTree2D, offset: u64) -> Result<(BTree2D, Vec<u8>)> {
+        // TODO: currently values may be serialized into both trees. we should deduplicate that.
         let mut buf = vec![0; 16];
         let primary_offset = Self::serialize_b_tree(tree.primary_tree, offset, &mut buf)?;
         buf[..8].copy_from_slice(&primary_offset.to_be_bytes());
@@ -265,17 +272,19 @@ impl Partition {
         let tree = f(Tree {
             loader: Loader(&mut self.f),
             inner: self.tree.clone(),
-        })?
-        .into_inner();
-        let (tree, buf) = Self::serialize_tree(
-            tree,
-            self.f.size() + append_only_file::ENTRY_PREFIX_LENGTH as u64,
-        )
-        .with_context(|| "unable to serialize tree")?;
-        self.f
-            .append(&buf)
-            .with_context(|| "unable to append tree to append-only file")?;
-        self.tree = tree;
+        })?;
+        let tree = tree.into_inner();
+        if !tree.is_persisted() {
+            let (tree, buf) = Self::serialize_tree(
+                tree,
+                self.f.size() + append_only_file::ENTRY_PREFIX_LENGTH as u64,
+            )
+            .with_context(|| "unable to serialize tree")?;
+            self.f
+                .append(&buf)
+                .with_context(|| "unable to append tree to append-only file")?;
+            self.tree = tree;
+        }
         Ok(())
     }
 }
@@ -309,12 +318,14 @@ mod tests {
             let mut partition = Partition::open(&path).unwrap();
 
             partition
-                .commit(|tree| tree.insert(key("foo", "a", None), "bar".into()))
+                .commit(|tree| {
+                    tree.insert(key("foo", "a", None), |_| Some(Value::Bytes("bar".into())))
+                })
                 .unwrap();
 
             assert_eq!(
                 partition.tree().get(&primary_key("foo", "a")).unwrap(),
-                Some("bar".into())
+                Some(Value::Bytes("bar".into()))
             );
         }
 
@@ -324,7 +335,7 @@ mod tests {
 
             assert_eq!(
                 partition.tree().get(&primary_key("foo", "a")).unwrap(),
-                Some("bar".into())
+                Some(Value::Bytes("bar".into()))
             );
         }
     }

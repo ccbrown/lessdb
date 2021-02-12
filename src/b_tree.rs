@@ -14,6 +14,13 @@ impl<K: Clone, V: Clone> Tree<K, V> {
             Self::Volatile { node, .. } => Ok(node.clone()),
         }
     }
+
+    pub fn is_persisted(&self) -> bool {
+        match self {
+            Self::Persisted { .. } => true,
+            Self::Volatile { .. } => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -164,34 +171,59 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
         }
     }
 
-    /// Inserts a new item into the B-tree or updates an existing one. If the item existed, its previous value is returned.
+    /// Inserts a new item into the B-tree or updates an existing one. `value` is a function that
+    /// is invoked with the existing value for the key. If it returns `None`, no change is made.
+    /// Otherwise the item is updated and its previous value is returned.
     pub fn insert<E, L: Loader<K, V, Error = E>>(
         &self,
         loader: &mut L,
         key: K,
         value: V,
     ) -> Result<(Self, Option<Value<V>>), E> {
-        let (node, prev) = self.insert_impl(loader, key, value)?;
-        Ok((
-            match node.split_if_overflow() {
-                (a, None) => Tree::Volatile { node: a },
-                (a, Some((b_key, b))) => Tree::Volatile {
-                    node: Node::Internal {
-                        index: vec![b_key],
-                        children: vec![Tree::Volatile { node: a }, Tree::Volatile { node: b }],
-                    },
-                },
-            },
-            prev,
-        ))
+        Ok(self
+            .insert_conditionally(loader, key, |_, _| Ok(Some(value)))?
+            .expect("this is unconditional"))
     }
 
-    fn insert_impl<E, L: Loader<K, V, Error = E>>(
+    /// Inserts a new item into the B-tree or updates an existing one. `value` is a function that
+    /// is invoked with the existing value for the key. If it returns `None`, no change is made.
+    /// Otherwise the item is updated and its previous value is returned.
+    pub fn insert_conditionally<
+        E,
+        L: Loader<K, V, Error = E>,
+        F: FnOnce(&mut L, Option<&Value<V>>) -> Result<Option<V>, E>,
+    >(
         &self,
         loader: &mut L,
         key: K,
-        value: V,
-    ) -> Result<(Node<K, V>, Option<Value<V>>), E> {
+        value: F,
+    ) -> Result<Option<(Self, Option<Value<V>>)>, E> {
+        Ok(self.insert_impl(loader, key, value)?.map(|(node, prev)| {
+            (
+                match node.split_if_overflow() {
+                    (a, None) => Tree::Volatile { node: a },
+                    (a, Some((b_key, b))) => Tree::Volatile {
+                        node: Node::Internal {
+                            index: vec![b_key],
+                            children: vec![Tree::Volatile { node: a }, Tree::Volatile { node: b }],
+                        },
+                    },
+                },
+                prev,
+            )
+        }))
+    }
+
+    fn insert_impl<
+        E,
+        L: Loader<K, V, Error = E>,
+        F: FnOnce(&mut L, Option<&Value<V>>) -> Result<Option<V>, E>,
+    >(
+        &self,
+        loader: &mut L,
+        key: K,
+        value: F,
+    ) -> Result<Option<(Node<K, V>, Option<Value<V>>)>, E> {
         Ok(match self.load_node(loader)? {
             Node::Internal { index, children } => {
                 let i = match index.binary_search(&key) {
@@ -200,44 +232,47 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                 };
                 let mut new_children = Vec::with_capacity(children.len() + 1);
                 new_children.extend_from_slice(&children[..i]);
-                let (new_child, prev_value) = children[i].insert_impl(loader, key, value)?;
-                let new_index = match new_child.split_if_overflow() {
-                    (a, None) => {
-                        new_children.push(Tree::Volatile { node: a });
-                        index
-                    }
-                    (a, Some((b_key, b))) => {
-                        let mut new_index = Vec::with_capacity(index.len() + 1);
-                        new_index.extend_from_slice(&index[..i]);
-                        new_index.push(b_key);
-                        new_index.extend_from_slice(&index[i..]);
-                        new_children.push(Tree::Volatile { node: a });
-                        new_children.push(Tree::Volatile { node: b });
-                        new_index
-                    }
-                };
-                new_children.extend_from_slice(&children[i + 1..]);
-                (
-                    Node::Internal {
-                        index: new_index,
-                        children: new_children,
-                    },
-                    prev_value,
-                )
+                children[i]
+                    .insert_impl(loader, key, value)?
+                    .map(|(new_child, prev_value)| {
+                        let new_index = match new_child.split_if_overflow() {
+                            (a, None) => {
+                                new_children.push(Tree::Volatile { node: a });
+                                index
+                            }
+                            (a, Some((b_key, b))) => {
+                                let mut new_index = Vec::with_capacity(index.len() + 1);
+                                new_index.extend_from_slice(&index[..i]);
+                                new_index.push(b_key);
+                                new_index.extend_from_slice(&index[i..]);
+                                new_children.push(Tree::Volatile { node: a });
+                                new_children.push(Tree::Volatile { node: b });
+                                new_index
+                            }
+                        };
+                        new_children.extend_from_slice(&children[i + 1..]);
+                        (
+                            Node::Internal {
+                                index: new_index,
+                                children: new_children,
+                            },
+                            prev_value,
+                        )
+                    })
             }
             Node::Leaf {
                 mut keys,
                 mut values,
             } => match keys.binary_search(&key) {
-                Ok(i) => {
+                Ok(i) => value(loader, Some(&values[i]))?.map(|value| {
                     let prev = std::mem::replace(&mut values[i], Value::Volatile { value });
                     (Node::Leaf { keys, values }, Some(prev))
-                }
-                Err(dest) => {
+                }),
+                Err(dest) => value(loader, None)?.map(|value| {
                     keys.insert(dest, key);
                     values.insert(dest, Value::Volatile { value });
                     (Node::Leaf { keys, values }, None)
-                }
+                }),
             },
         })
     }
@@ -409,11 +444,11 @@ mod tests {
     impl Loader<i32, String> for Storage {
         type Error = anyhow::Error;
 
-        fn load_node(&mut self, id: u64) -> Result<Node<i32, String>, Self::Error> {
+        fn load_node(&mut self, _id: u64) -> Result<Node<i32, String>, Self::Error> {
             panic!("the tests don't persist nodes")
         }
 
-        fn load_value(&mut self, id: u64) -> Result<String, Self::Error> {
+        fn load_value(&mut self, _id: u64) -> Result<String, Self::Error> {
             panic!("the tests don't persist values")
         }
     }

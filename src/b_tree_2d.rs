@@ -83,6 +83,10 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         }
     }
 
+    pub fn is_persisted(&self) -> bool {
+        self.primary_tree.is_persisted() && self.secondary_tree.is_persisted()
+    }
+
     /// Gets an item from the B-tree, if it exists.
     pub fn get<E, L: Loader<H, S, V, Error = E>>(
         &self,
@@ -93,30 +97,40 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     }
 
     /// Inserts a new item into the B-tree or updates an existing one.
-    pub fn insert<E, L: Loader<H, S, V, Error = E>>(
+    pub fn insert<E, L: Loader<H, S, V, Error = E>, F: FnOnce(Option<&V>) -> Option<V>>(
         &self,
         loader: &mut L,
         key: Key<H, S>,
-        value: V,
+        value: F,
     ) -> Result<Self, E> {
-        let value = Value {
-            secondary_sort: key.secondary_sort.clone(),
-            value: value.clone(),
+        let mut new_value = None;
+        let mut prev_value = None;
+
+        let (primary_tree, _) = match self.primary_tree.insert_conditionally(
+            loader,
+            key.primary.clone(),
+            |loader, prev| {
+                prev_value = match prev {
+                    Some(prev) => Some(prev.clone().load::<_, SecondaryKey<H, S>, _>(loader)?),
+                    None => None,
+                };
+                Ok(
+                    value(prev_value.as_ref().map(|prev| &prev.value)).map(|value| {
+                        let value = Value {
+                            secondary_sort: key.secondary_sort.clone(),
+                            value: value,
+                        };
+                        new_value = Some(value.clone());
+                        value
+                    }),
+                )
+            },
+        )? {
+            Some(result) => result,
+            None => return Ok(self.clone()),
         };
 
-        let (primary_tree, prev) =
-            self.primary_tree
-                .insert(loader, key.primary.clone(), value.clone())?;
-
-        let mut secondary_tree = match prev
-            .map(|prev| -> Result<_, _> {
-                Ok(prev
-                    .load::<_, SecondaryKey<H, S>, _>(loader)?
-                    .secondary_sort)
-            })
-            .transpose()?
-            .flatten()
-        {
+        let mut secondary_tree = match prev_value.and_then(|prev| prev.secondary_sort) {
             Some(prev_secondary_sort) => {
                 let (tree, _) = self.secondary_tree.delete(
                     loader,
@@ -131,7 +145,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
             None => self.secondary_tree.clone(),
         };
 
-        if let Some(secondary_sort) = key.secondary_sort {
+        if let (Some(new_value), Some(secondary_sort)) = (new_value, key.secondary_sort) {
             let (tree, _) = secondary_tree.insert(
                 loader,
                 SecondaryKey {
@@ -139,9 +153,9 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
                     secondary_sort: secondary_sort,
                     primary_sort: key.primary.sort,
                 },
-                value,
+                new_value,
             )?;
-            secondary_tree = tree
+            secondary_tree = tree;
         }
 
         Ok(Self {
@@ -150,23 +164,18 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         })
     }
 
-    /// Deletes a new item from the B-tree.
+    /// Deletes a new item from the B-tree. Returns the previous value if the item existed.
     pub fn delete<E, L: Loader<H, S, V, Error = E>>(
         &self,
         loader: &mut L,
         key: &PrimaryKey<H, S>,
-    ) -> Result<Self, E> {
+    ) -> Result<(Self, Option<V>), E> {
         let (primary_tree, prev) = self.primary_tree.delete(loader, &key)?;
+        let prev = prev
+            .map(|prev| -> Result<_, _> { Ok(prev.load::<_, SecondaryKey<H, S>, _>(loader)?) })
+            .transpose()?;
 
-        let secondary_tree = match prev
-            .map(|prev| -> Result<_, _> {
-                Ok(prev
-                    .load::<_, SecondaryKey<H, S>, _>(loader)?
-                    .secondary_sort)
-            })
-            .transpose()?
-            .flatten()
-        {
+        let secondary_tree = match prev.as_ref().and_then(|prev| prev.secondary_sort.clone()) {
             Some(prev_secondary_sort) => {
                 let (tree, _) = self.secondary_tree.delete(
                     loader,
@@ -181,10 +190,13 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
             None => self.secondary_tree.clone(),
         };
 
-        Ok(Self {
-            primary_tree,
-            secondary_tree,
-        })
+        Ok((
+            Self {
+                primary_tree,
+                secondary_tree,
+            },
+            prev.map(|prev| prev.value),
+        ))
     }
 
     #[cfg(test)]
@@ -208,19 +220,19 @@ mod tests {
 
         fn load_primary_node(
             &mut self,
-            id: u64,
+            _id: u64,
         ) -> Result<PrimaryNode<i32, i32, String>, Self::Error> {
             panic!("the tests don't persist nodes")
         }
 
         fn load_secondary_node(
             &mut self,
-            id: u64,
+            _id: u64,
         ) -> Result<SecondaryNode<i32, i32, String>, Self::Error> {
             panic!("the tests don't persist nodes")
         }
 
-        fn load_value(&mut self, id: u64) -> Result<Value<i32, String>, Self::Error> {
+        fn load_value(&mut self, _id: u64) -> Result<Value<i32, String>, Self::Error> {
             panic!("the tests don't persist values")
         }
     }
@@ -245,13 +257,17 @@ mod tests {
 
         // insert some arbitrary values
         for i in (100..900).step_by(10) {
-            root = root.insert(&mut storage, key(i), i.to_string()).unwrap();
+            root = root
+                .insert(&mut storage, key(i), |_| Some(i.to_string()))
+                .unwrap();
             root.assert_invariants(&mut storage);
         }
 
         for i in (0..1000).step_by(9) {
             // test inserting the value
-            root = root.insert(&mut storage, key(i), "-1".to_string()).unwrap();
+            root = root
+                .insert(&mut storage, key(i), |_| Some("-1".to_string()))
+                .unwrap();
             root.assert_invariants(&mut storage);
             assert_eq!(
                 root.get(&mut storage, &primary_key(i)).unwrap(),
@@ -259,7 +275,9 @@ mod tests {
             );
 
             // test updating the value
-            root = root.insert(&mut storage, key(i), i.to_string()).unwrap();
+            root = root
+                .insert(&mut storage, key(i), |_| Some(i.to_string()))
+                .unwrap();
             root.assert_invariants(&mut storage);
             assert_eq!(
                 root.get(&mut storage, &primary_key(i)).unwrap(),
@@ -269,7 +287,7 @@ mod tests {
 
         // test deleting values
         for i in (0..1000).step_by(3) {
-            let root = root.delete(&mut storage, &primary_key(i)).unwrap();
+            let (root, _) = root.delete(&mut storage, &primary_key(i)).unwrap();
             root.assert_invariants(&mut storage);
             assert_eq!(root.get(&mut storage, &primary_key(i)).unwrap(), None);
         }

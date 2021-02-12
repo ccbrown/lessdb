@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["Christopher Brown <ccbrown112@gmail.com>"]
 edition = "2018"
 
+[build-dependencies]
+protoc-rust = "2.22.0"
+
 [dependencies]
 clap = "2.33.3"
 serde = { version = "1.0.123", features = ["derive", "rc"] }
@@ -17,6 +20,8 @@ termios = "0.3.3"
 slog-term = "2.8.0"
 slog-async = "2.6.0"
 slog-json = "2.3.0"
+protobuf = { version = "2.22.0", features = ["with-bytes"] }
+bytes = { version = "1.0.1", features = ["serde"] }
 
 [dev-dependencies]
 tempdir = "0.3.7"

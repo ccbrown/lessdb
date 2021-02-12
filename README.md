@@ -15,11 +15,11 @@ ElastiKV is a key-value store meant to be similar to DynamoDB in scale and robus
 
 ### Items
 
-All items have a unique combination of binary hash key binary range key. The
-hash key is used to assign the items to partitions and the range key is used to
-sort and iterate through multiple items sharing a hash key. Additionally items
-can have a second range key for an additional sort dimension. The equivalent
-DynamoDB schema looks like this:
+All underlying items have a unique combination of binary hash key binary sort
+key. The hash key is used to assign the items to partitions and the sort key is
+used to sort and iterate through multiple items sharing a hash key.
+Additionally items can have a second sort key for an additional sort dimension.
+The equivalent DynamoDB schema looks like this:
 
 ```yaml
 DynamoDBTable:
@@ -48,13 +48,27 @@ DynamoDBTable:
           ProjectionType: ALL
 ```
 
+The hash key is an actual 32-byte hash. It is computed by clients, so the
+server is agnostic to the hashing mechanism itself, but SHA-256 is a reasonable
+choice.
+
+Items can contain one of the following values:
+
+* A binary blob.
+* An integer.
+* A set of values.
+
+To clients most of these details are completely abstracted away into a higher
+level Redis-like API.
+
 ### Partitions
 
-Each item is assigned to one of 65536 partitions based on its hash key. Each
-partition is replicated to at least 3 nodes in the cluster. As nodes join and
-leave the cluster, nodes may be moved around to balance the load. Note that
-this design is subject to hot partitions in a way similar to DynamoDB, though
-the thresholds at which this happens can be made be much higher.
+Each item is assigned to one of 65536 partitions based on the first two bytes
+of its hash key. Each partition is replicated to at least 3 nodes in the
+cluster. As nodes join and leave the cluster, nodes may be moved around to
+balance the load. Note that this design is subject to hot partitions in a way
+similar to DynamoDB, though the thresholds at which this happens can be made be
+much higher.
 
 For example, a 1PB store with uniformly distributed hash keys will have
 partitions that are about 15GB in size. If this store uses 200 nodes, each
@@ -62,5 +76,14 @@ will own about 1000 partitions and require about 15TB of storage. At this scale,
 bringing new nodes into the cluster would take considerable time, but requests
 should remain nearly as fast as any other scale cluster.
 
-Partitions consist of append-only B+trees where each modification appends a new
-root node to the partition.
+Partitions consist of an append-only "2D" B+tree where each modification
+appends a new root node to the partition. The "2D" B+tree is actually just two
+B+trees combined into one data structure. Items that have a secondary sort key
+are inserted into the secondary B+tree so they can be accessed based on this
+second dimension.
+
+### Client API
+
+The client API is a simple MessagePack TCP API: Clients open a connection, send
+a request, then get a response. A single connection can be used for multiple
+requests, but requests will be served sequentially.

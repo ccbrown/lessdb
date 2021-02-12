@@ -13,6 +13,7 @@ mod b_tree_2d;
 mod client;
 mod node;
 mod partition;
+mod protos;
 
 use node::Node;
 
