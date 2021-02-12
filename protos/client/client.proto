@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-import "rustproto.proto";
+import "common/rustproto.proto";
 
 option (rustproto.carllerche_bytes_for_bytes_all) = true;
 
