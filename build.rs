@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-changed=protos");
     protoc_rust::Codegen::new()
         .customize(protoc_rust::Customize {
             carllerche_bytes_for_bytes: Some(true),
