@@ -49,10 +49,17 @@ impl From<&str> for Hash {
     }
 }
 
+#[derive(Clone, Debug, Ord, Hash, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Scalar {
+    Bytes(Bytes),
+    Int(i64),
+}
+
 #[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     Bytes(Bytes),
     Int(i64),
+    Set(Vec<Scalar>),
 }
 
 type BTree2D = b_tree_2d::Tree<Hash, Bytes, Value>;

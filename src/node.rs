@@ -1,7 +1,7 @@
-use super::partition::{Hash, Key, Partition, PrimaryKey, Value};
+use super::partition::{Hash, Key, Partition, PrimaryKey, Scalar, Value};
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use std::{convert::TryInto, path::Path, sync::Mutex};
+use std::{collections::HashSet, convert::TryInto, path::Path, sync::Mutex};
 
 const PARTITION_COUNT: usize = 1 << 16;
 
@@ -123,5 +123,80 @@ impl Node {
             )?)
         })?;
         Ok(new_value)
+    }
+
+    /// Adds one or more members to the set with the given key or creates it if it doesn't exist.
+    pub fn set_add<I: IntoIterator<Item = Scalar>>(&self, key: Hash, members: I) -> Result<()> {
+        let to_add: HashSet<Scalar> = members.into_iter().collect();
+
+        let partition = &self.partitions[partition_number(&key)];
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+
+        partition.commit(|tree| {
+            Ok(tree.insert(
+                Key {
+                    primary: PrimaryKey {
+                        hash: key,
+                        sort: Bytes::new(),
+                    },
+                    secondary_sort: None,
+                },
+                |prev| match prev {
+                    Some(Value::Set(members)) => {
+                        let mut did_add = false;
+                        let mut members: HashSet<&Scalar> = members.into_iter().collect();
+                        for m in &to_add {
+                            if members.insert(m) {
+                                did_add = true;
+                            }
+                        }
+                        if did_add {
+                            Some(Value::Set(members.into_iter().cloned().collect()))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => Some(Value::Set(to_add.into_iter().collect())),
+                },
+            )?)
+        })?;
+        Ok(())
+    }
+
+    /// Removes one or more members from the set with the given key if it exists.
+    pub fn set_remove<I: IntoIterator<Item = Scalar>>(&self, key: Hash, members: I) -> Result<()> {
+        let to_remove: HashSet<Scalar> = members.into_iter().collect();
+
+        let partition = &self.partitions[partition_number(&key)];
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+
+        partition.commit(|tree| {
+            Ok(tree.insert(
+                Key {
+                    primary: PrimaryKey {
+                        hash: key,
+                        sort: Bytes::new(),
+                    },
+                    secondary_sort: None,
+                },
+                |prev| match prev {
+                    Some(Value::Set(members)) => {
+                        let original_len = members.len();
+                        let new_members: Vec<_> = members
+                            .into_iter()
+                            .filter(|m| !to_remove.contains(m))
+                            .cloned()
+                            .collect();
+                        if new_members.len() < original_len {
+                            Some(Value::Set(new_members))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                },
+            )?)
+        })?;
+        Ok(())
     }
 }
