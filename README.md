@@ -1,6 +1,6 @@
-# elastikv
+# lessdb
 
-ElastiKV is a key-value store meant to be similar to DynamoDB in scale and robustness, but with significantly higher performance.
+LessDB is a key-value store meant to be similar to DynamoDB in scale and robustness, but with significantly higher performance.
 
 ## Goals
 

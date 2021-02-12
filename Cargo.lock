@@ -163,30 +163,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "elastikv"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "byteorder",
- "bytes",
- "clap",
- "crc32fast",
- "digest",
- "protobuf",
- "protoc-rust",
- "rmp-serde",
- "serde",
- "sha2",
- "slog",
- "slog-async",
- "slog-json",
- "slog-term",
- "tempdir",
- "termios",
- "thiserror",
-]
-
-[[package]]
 name = "fuchsia-cprng"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -233,6 +209,30 @@ name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
+
+[[package]]
+name = "lessdb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "bytes",
+ "clap",
+ "crc32fast",
+ "digest",
+ "protobuf",
+ "protoc-rust",
+ "rmp-serde",
+ "serde",
+ "sha2",
+ "slog",
+ "slog-async",
+ "slog-json",
+ "slog-term",
+ "tempdir",
+ "termios",
+ "thiserror",
+]
 
 [[package]]
 name = "libc"
