@@ -1,3 +1,4 @@
 /data*
 /target
 /src/protos/client.rs
+/src/protos/client_grpc.rs

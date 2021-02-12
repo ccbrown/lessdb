@@ -1,13 +1,6 @@
 fn main() {
-    println!("cargo:rerun-if-changed=protos");
-    protoc_rust::Codegen::new()
-        .customize(protoc_rust::Customize {
-            carllerche_bytes_for_bytes: Some(true),
-            ..Default::default()
-        })
-        .out_dir("src/protos")
-        .inputs(&["protos/client.proto"])
-        .include("protos")
-        .run()
-        .expect("protoc");
+    let proto_root = "protos";
+    println!("cargo:rerun-if-changed={}", proto_root);
+    protoc_grpcio::compile_grpc_protos(&["protos/client.proto"], &[proto_root], "src/protos", None)
+        .expect("failed to compile grpc definitions");
 }

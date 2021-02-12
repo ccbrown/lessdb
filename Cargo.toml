@@ -5,7 +5,7 @@ authors = ["Christopher Brown <ccbrown112@gmail.com>"]
 edition = "2018"
 
 [build-dependencies]
-protoc-rust = "2.22.0"
+protoc-grpcio = "3.0.0"
 
 [dependencies]
 clap = "2.33.3"
@@ -22,6 +22,8 @@ slog-async = "2.6.0"
 slog-json = "2.3.0"
 protobuf = { version = "2.22.0", features = ["with-bytes"] }
 bytes = { version = "1.0.1", features = ["serde"] }
+grpcio = { version = "0.7.1", default-features = false, features = ["protobuf-codec"] }
+futures = "0.3.12"
 
 [dev-dependencies]
 tempdir = "0.3.7"

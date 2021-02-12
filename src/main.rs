@@ -64,12 +64,12 @@ fn main() -> Result<()> {
         matches.value_of("data").expect("this argument is required"),
     )?);
 
-    let client_api = client::API::new(node, logger);
-    client_api.listen(
-        matches
-            .value_of("client-listen-addr")
-            .expect("this argument is required"),
-    )?;
+    let client_listen_addr = matches
+        .value_of("client-listen-addr")
+        .expect("this argument is required");
+    let _client_api = client::API::new(logger, node, client_listen_addr);
 
-    Ok(())
+    loop {
+        std::thread::park();
+    }
 }

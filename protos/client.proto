@@ -1,5 +1,9 @@
 syntax = "proto3";
 
+import "rustproto.proto";
+
+option (rustproto.carllerche_bytes_for_bytes_all) = true;
+
 message Scalar {
     oneof value {
         bytes bytes = 1;
@@ -19,29 +23,45 @@ message ScalarArray {
     repeated Scalar scalars = 1;
 }
 
-message Request {
+message Error {
+    enum Code {
+        INTERNAL = 0;
+    }
+
+    Code code = 1;
+}
+
+message GetRequest {
+    bytes key = 1;
+}
+
+message GetResult {
+    Value value = 1;
+}
+
+message GetResponse {
     oneof body {
-        GetOperation get = 1;
-        SetOperation set = 2;
-        DeleteOperation delete = 3;
-        SetAddOperation set_add = 4;
-        SetRemoveOperation set_remove = 5;
-        MapSetOperation map_set = 6;
-        MapDeleteOperation map_delete = 7;
-        GetMapRangeOperation get_map_range = 8;
-        GetMapRangeByFieldOperation get_map_range_by_field = 9;
+        Error error = 1;
+        GetResult result = 2;
     }
 }
 
-message GetOperation {
+message DeleteRequest {
     bytes key = 1;
 }
 
-message DeleteOperation {
-    bytes key = 1;
+message DeleteResult {
+    bool did_delete = 1;
 }
 
-message SetOperation {
+message DeleteResponse {
+    oneof body {
+        Error error = 1;
+        DeleteResult result = 2;
+    }
+}
+
+message SetRequest {
     message Condition {
         oneof value {
             bool exists = 1;
@@ -54,26 +74,75 @@ message SetOperation {
     Condition condition = 3;
 }
 
-message SetAddOperation {
+message SetResult {
+    bool did_set = 1;
+}
+
+message SetResponse {
+    oneof body {
+        Error error = 1;
+        SetResult result = 2;
+    }
+}
+
+message SetAddRequest {
     bytes key = 1;
     repeated Scalar members = 2;
 }
 
-message SetRemoveOperation {
+message SetAddResult {}
+
+message SetAddResponse {
+    oneof body {
+        Error error = 1;
+        SetAddResult result = 2;
+    }
+}
+
+message SetRemoveRequest {
     bytes key = 1;
     repeated Scalar members = 2;
 }
 
-message MapSetOperation {
+message SetRemoveResult {}
+
+message SetRemoveResponse {
+    oneof body {
+        Error error = 1;
+        SetRemoveResult result = 2;
+    }
+}
+
+message MapSetRequest {
     bytes key = 1;
     Scalar field = 2;
     Value value = 3;
     Scalar order = 4;
 }
 
-message MapDeleteOperation {
+message MapSetResult {}
+
+message MapSetResponse {
+    oneof body {
+        Error error = 1;
+        MapSetResult result = 2;
+    }
+}
+
+message MapDeleteRequest {
     bytes key = 1;
     Scalar field = 2;
+}
+
+message MapDeleteResult {
+    bool did_delete = 1;
+}
+
+message MapDeleteResponse {
+    oneof body {
+        Error error = 1;
+        MapDeleteResult result = 2;
+    }
 }
 
 message Bound {
@@ -83,71 +152,52 @@ message Bound {
     }
 }
 
-message GetMapRangeOperation {
+message GetMapRangeRequest {
     bytes key = 1;
     Bound start = 2;
     Bound end = 3;
     bool reverse = 4;
     uint32 limit = 5;
-}
-
-message GetMapRangeByFieldOperation {
-    bytes key = 1;
-    Bound start = 2;
-    Bound end = 3;
-    bool reverse = 4;
-    uint32 limit = 5;
-}
-
-message Response {
-    oneof body {
-        Error error = 1;
-        GetResult get = 2;
-        SetResult set = 3;
-        DeleteResult delete = 4;
-        SetAddResult set_add = 5;
-        SetRemoveResult set_remove = 6;
-        MapSetResult map_set = 7;
-        MapDeleteResult map_delete = 8;
-        GetMapRangeResult get_map_range = 9;
-        GetMapRangeByFieldResult get_map_range_by_field = 10;
-    }
-}
-
-message Error {
-    enum Code {
-        INTERNAL = 0;
-    }
-
-    Code code = 1;
-}
-
-message GetResult {
-    Value value = 1;
-}
-
-message DeleteResult {
-    bool did_delete = 1;
-}
-
-message SetResult {
-    bool did_set = 1;
-}
-
-message SetAddResult {}
-
-message SetRemoveResult {}
-
-message MapSetResult {}
-
-message MapDeleteResult {
-    bool did_delete = 1;
 }
 
 message GetMapRangeResult {
     repeated Value values = 1;
 }
 
+message GetMapRangeResponse {
+    oneof body {
+        Error error = 1;
+        GetMapRangeResult result = 2;
+    }
+}
+
+message GetMapRangeByFieldRequest {
+    bytes key = 1;
+    Bound start = 2;
+    Bound end = 3;
+    bool reverse = 4;
+    uint32 limit = 5;
+}
+
 message GetMapRangeByFieldResult {
     repeated Value values = 1;
+}
+
+message GetMapRangeByFieldResponse {
+    oneof body {
+        Error error = 1;
+        GetMapRangeByFieldResult result = 2;
+    }
+}
+
+service Service {
+    rpc get(GetRequest) returns (GetResponse);
+    rpc set(SetRequest) returns (SetResponse);
+    rpc delete(DeleteRequest) returns (DeleteResponse);
+    rpc set_add(SetAddRequest) returns (SetAddResponse);
+    rpc set_remove(SetRemoveRequest) returns (SetRemoveResponse);
+    rpc map_set(MapSetRequest) returns (MapSetResponse);
+    rpc map_delete(MapDeleteRequest) returns (MapDeleteResponse);
+    rpc get_map_range(GetMapRangeRequest) returns (GetMapRangeResponse);
+    rpc get_map_range_by_field(GetMapRangeByFieldRequest) returns (GetMapRangeByFieldResponse);
 }
