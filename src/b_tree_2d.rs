@@ -1,5 +1,6 @@
-use super::b_tree::{Loader as BTreeLoader, Node as BTreeNode, Tree as BTree};
+use super::b_tree::{Loader as BTreeLoader, Node as BTreeNode, Range as BTreeRange, Tree as BTree};
 use serde::{Deserialize, Serialize};
+use std::ops::RangeBounds;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Key<H, S> {
@@ -74,6 +75,40 @@ impl<H: Clone, S: Clone, V: Clone, E, L: Loader<H, S, V, Error = E>>
     }
 }
 
+pub struct Range<'a, K: Clone, S: Clone, V: Clone, L, B>(BTreeRange<'a, K, Value<S, V>, L, B>);
+
+impl<
+        'a,
+        K: Clone + Ord,
+        S: Clone,
+        V: Clone,
+        E,
+        L: BTreeLoader<K, Value<S, V>, Error = E>,
+        B: RangeBounds<K>,
+    > Iterator for Range<'a, K, S, V, L, B>
+{
+    type Item = Result<V, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|v| v.map(|v| v.value))
+    }
+}
+
+impl<
+        'a,
+        K: Clone + Ord,
+        S: Clone,
+        V: Clone,
+        E,
+        L: BTreeLoader<K, Value<S, V>, Error = E>,
+        B: RangeBounds<K>,
+    > DoubleEndedIterator for Range<'a, K, S, V, L, B>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0.next_back().map(|v| v.map(|v| v.value))
+    }
+}
+
 impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     /// Creates a new, empty B-tree.
     pub fn new() -> Self {
@@ -94,6 +129,34 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         key: &PrimaryKey<H, S>,
     ) -> Result<Option<V>, E> {
         Ok(self.primary_tree.get(loader, key)?.map(|v| v.value.clone()))
+    }
+
+    /// Gets a range of items based on their primary key.
+    pub fn get_range_by_primary_key<
+        'a,
+        E,
+        L: Loader<H, S, V, Error = E>,
+        B: RangeBounds<PrimaryKey<H, S>>,
+    >(
+        &'a self,
+        loader: &'a mut L,
+        bounds: B,
+    ) -> Range<'a, PrimaryKey<H, S>, S, V, L, B> {
+        Range(self.primary_tree.get_range(loader, bounds))
+    }
+
+    /// Gets a range of items based on their secondary key.
+    pub fn get_range_by_secondary_key<
+        'a,
+        E,
+        L: Loader<H, S, V, Error = E>,
+        B: RangeBounds<SecondaryKey<H, S>>,
+    >(
+        &'a self,
+        loader: &'a mut L,
+        bounds: B,
+    ) -> Range<'a, SecondaryKey<H, S>, S, V, L, B> {
+        Range(self.secondary_tree.get_range(loader, bounds))
     }
 
     /// Inserts a new item into the B-tree or updates an existing one.

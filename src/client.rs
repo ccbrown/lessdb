@@ -8,6 +8,7 @@ use protobuf::Message;
 use std::{
     convert::{TryFrom, TryInto},
     net::{TcpListener, TcpStream, ToSocketAddrs},
+    ops::Bound,
     sync::Arc,
 };
 
@@ -24,6 +25,17 @@ impl TryFrom<proto::Scalar> for Scalar {
                 proto::Scalar_oneof_value::bytes(bytes) => Scalar::Bytes(bytes.into()),
                 proto::Scalar_oneof_value::int(n) => Scalar::Int(n),
             }),
+            None => Err(MissingValueError),
+        }
+    }
+}
+
+impl TryFrom<Option<proto::Scalar>> for Scalar {
+    type Error = MissingValueError;
+
+    fn try_from(value: Option<proto::Scalar>) -> Result<Self, Self::Error> {
+        match value {
+            Some(value) => value.try_into(),
             None => Err(MissingValueError),
         }
     }
@@ -85,6 +97,14 @@ impl Into<proto::Value> for Value {
         });
         value
     }
+}
+
+fn convert_bound(bound: Option<proto::Bound>) -> Result<Bound<Scalar>, MissingValueError> {
+    Ok(match bound.and_then(|bound| bound.value) {
+        None => Bound::Unbounded,
+        Some(proto::Bound_oneof_value::included(scalar)) => Bound::Included(scalar.try_into()?),
+        Some(proto::Bound_oneof_value::excluded(scalar)) => Bound::Excluded(scalar.try_into()?),
+    })
 }
 
 pub struct API {
@@ -180,14 +200,6 @@ impl API {
                         proto::Response_oneof_body::delete(result)
                     })
                 }
-                proto::Request_oneof_body::increment(op) => {
-                    let key = op.key.try_into()?;
-                    node.increment(key, op.amount).map(|new_value| {
-                        let mut result = proto::IncrementResult::new();
-                        result.set_new_value(new_value);
-                        proto::Response_oneof_body::increment(result)
-                    })
-                }
                 proto::Request_oneof_body::set_add(op) => {
                     let key = op.key.try_into()?;
                     let members: Vec<Scalar> = op
@@ -207,6 +219,63 @@ impl API {
                         .collect::<Result<_, _>>()?;
                     node.set_remove(key, members).map(|_| {
                         proto::Response_oneof_body::set_remove(proto::SetRemoveResult::new())
+                    })
+                }
+                proto::Request_oneof_body::map_set(mut op) => {
+                    let key = op.key.try_into()?;
+                    let field = op.field.take().try_into()?;
+                    let value = op.value.take().try_into()?;
+                    let order = op.order.take().try_into()?;
+                    node.map_set(key, field, value, order)
+                        .map(|_| proto::Response_oneof_body::map_set(proto::MapSetResult::new()))
+                }
+                proto::Request_oneof_body::map_delete(mut op) => {
+                    let key = op.key.try_into()?;
+                    let field = op.field.take().try_into()?;
+                    node.map_delete(key, field).map(|did_delete| {
+                        let mut result = proto::MapDeleteResult::new();
+                        result.set_did_delete(did_delete);
+                        proto::Response_oneof_body::map_delete(result)
+                    })
+                }
+                proto::Request_oneof_body::get_map_range(mut op) => {
+                    let key = op.key.try_into()?;
+                    let start: Bound<Scalar> = convert_bound(op.start.take())?;
+                    let end: Bound<Scalar> = convert_bound(op.end.take())?;
+                    node.get_map_range(
+                        key,
+                        (start, end),
+                        if op.limit > 0 {
+                            Some(op.limit as usize)
+                        } else {
+                            None
+                        },
+                        op.reverse,
+                    )
+                    .map(|values| {
+                        let mut result = proto::GetMapRangeResult::new();
+                        result.set_values(values.into_iter().map(|v| v.into()).collect());
+                        proto::Response_oneof_body::get_map_range(result)
+                    })
+                }
+                proto::Request_oneof_body::get_map_range_by_field(mut op) => {
+                    let key = op.key.try_into()?;
+                    let start: Bound<Scalar> = convert_bound(op.start.take())?;
+                    let end: Bound<Scalar> = convert_bound(op.end.take())?;
+                    node.get_map_range_by_field(
+                        key,
+                        (start, end),
+                        if op.limit > 0 {
+                            Some(op.limit as usize)
+                        } else {
+                            None
+                        },
+                        op.reverse,
+                    )
+                    .map(|values| {
+                        let mut result = proto::GetMapRangeByFieldResult::new();
+                        result.set_values(values.into_iter().map(|v| v.into()).collect());
+                        proto::Response_oneof_body::get_map_range_by_field(result)
                     })
                 }
             }

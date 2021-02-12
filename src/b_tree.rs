@@ -1,3 +1,6 @@
+use std::collections::VecDeque;
+use std::ops::{Bound, RangeBounds};
+
 const MAX_NODE_CHILDREN: usize = 6;
 const MIN_NODE_CHILDREN: usize = MAX_NODE_CHILDREN / 2;
 
@@ -142,6 +145,247 @@ struct Deletion<K: Clone, V: Clone> {
     previous_value: Value<V>,
 }
 
+pub struct Range<'a, K: Clone, V: Clone, L, B> {
+    tree: &'a Tree<K, V>,
+    loader: &'a mut L,
+    bounds: B,
+    forward: Option<IteratorState<K, V>>,
+    backward: Option<IteratorState<K, V>>,
+}
+
+struct IteratorState<K: Clone, V: Clone> {
+    to_visit: Vec<VecDeque<Tree<K, V>>>,
+    keys: VecDeque<K>,
+    values: VecDeque<Value<V>>,
+}
+
+impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>
+    Range<'a, K, V, L, B>
+{
+    fn new(tree: &'a Tree<K, V>, loader: &'a mut L, bounds: B) -> Self {
+        Self {
+            tree,
+            loader,
+            bounds,
+            forward: None,
+            backward: None,
+        }
+    }
+
+    /// Initializes the range state by finding the first leaf node that might be within the range.
+    /// Any values encountered by advancing through the returned state are guaranteed to not come
+    /// before the range.
+    fn init_forward_state(&mut self) -> Result<IteratorState<K, V>, E> {
+        let mut to_visit = vec![];
+        let mut node = self.tree.load_node(self.loader)?;
+        loop {
+            match node {
+                Node::Internal {
+                    index,
+                    mut children,
+                } => {
+                    let min_child_idx = match self.bounds.start_bound() {
+                        Bound::Unbounded => 0,
+                        Bound::Included(key) => match index.binary_search(&key) {
+                            Ok(i) => i + 1,
+                            Err(i) => i,
+                        },
+                        Bound::Excluded(key) => match index.binary_search(&key) {
+                            Ok(i) => i + 1,
+                            Err(i) => i,
+                        },
+                    };
+                    to_visit.push(children.split_off(min_child_idx + 1).into());
+                    node = children[min_child_idx].load_node(self.loader)?;
+                }
+                Node::Leaf {
+                    mut keys,
+                    mut values,
+                } => {
+                    let idx = match self.bounds.start_bound() {
+                        Bound::Unbounded => 0,
+                        Bound::Included(key) => match keys.binary_search(&key) {
+                            Ok(i) => i,
+                            Err(i) => i,
+                        },
+                        Bound::Excluded(key) => match keys.binary_search(&key) {
+                            Ok(i) => i + 1,
+                            Err(i) => i,
+                        },
+                    };
+                    return Ok(IteratorState {
+                        to_visit,
+                        keys: keys.split_off(idx).into(),
+                        values: values.split_off(idx).into(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Gets the next value within the range by advancing through the forward state.
+    fn get_next(&mut self) -> Result<Option<V>, E> {
+        if self.forward.is_none() {
+            self.forward = Some(self.init_forward_state()?);
+        }
+        let state = self.forward.as_mut().expect("we just set this");
+
+        if state.keys.is_empty() {
+            'outer: while let Some(next) = state.to_visit.last_mut() {
+                if let Some(mut tree) = next.pop_front() {
+                    loop {
+                        match tree.load_node(self.loader)? {
+                            Node::Internal { mut children, .. } => {
+                                state.to_visit.push(children.split_off(1).into());
+                                tree = children.remove(0);
+                            }
+                            Node::Leaf { keys, values } => {
+                                state.keys = keys.into();
+                                state.values = values.into();
+                                break 'outer;
+                            }
+                        }
+                    }
+                } else {
+                    state.to_visit.pop();
+                }
+            }
+        }
+
+        if let Some(key) = state.keys.pop_front() {
+            if self.bounds.contains(&key) {
+                let ret = state
+                    .values
+                    .pop_front()
+                    .expect("there should be the same number of keys and values")
+                    .load(self.loader)?;
+                return Ok(Some(ret));
+            } else {
+                return Ok(None);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Initializes the range state by finding the last leaf node that might be within the range.
+    /// Any values encountered by advancing backward through the returned state are guaranteed to
+    /// not come after the range.
+    fn init_backward_state(&mut self) -> Result<IteratorState<K, V>, E> {
+        let mut to_visit = vec![];
+        let mut node = self.tree.load_node(self.loader)?;
+        loop {
+            match node {
+                Node::Internal {
+                    index,
+                    mut children,
+                } => {
+                    let max_child_idx = match self.bounds.end_bound() {
+                        Bound::Unbounded => index.len(),
+                        Bound::Included(key) => match index.binary_search(&key) {
+                            Ok(i) => i + 1,
+                            Err(i) => i,
+                        },
+                        Bound::Excluded(key) => match index.binary_search(&key) {
+                            Ok(i) => i,
+                            Err(i) => i,
+                        },
+                    };
+                    let _ = children.split_off(max_child_idx + 1);
+                    node = children.remove(max_child_idx).load_node(self.loader)?;
+                    to_visit.push(children.into());
+                }
+                Node::Leaf {
+                    mut keys,
+                    mut values,
+                } => {
+                    let end = match self.bounds.end_bound() {
+                        Bound::Unbounded => keys.len(),
+                        Bound::Included(key) => match keys.binary_search(&key) {
+                            Ok(i) => i + 1,
+                            Err(i) => i,
+                        },
+                        Bound::Excluded(key) => match keys.binary_search(&key) {
+                            Ok(i) => i,
+                            Err(i) => i,
+                        },
+                    };
+                    let _ = keys.split_off(end);
+                    let _ = values.split_off(end);
+                    return Ok(IteratorState {
+                        to_visit,
+                        keys: keys.into(),
+                        values: values.into(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Gets the next value within the range by advancing backward through the backward state.
+    fn get_next_back(&mut self) -> Result<Option<V>, E> {
+        if self.backward.is_none() {
+            self.backward = Some(self.init_backward_state()?);
+        }
+        let state = self.backward.as_mut().expect("we just set this");
+
+        if state.keys.is_empty() {
+            'outer: while let Some(next) = state.to_visit.last_mut() {
+                if let Some(mut tree) = next.pop_back() {
+                    loop {
+                        match tree.load_node(self.loader)? {
+                            Node::Internal { mut children, .. } => {
+                                tree = children.remove(children.len() - 1);
+                                state.to_visit.push(children.into());
+                            }
+                            Node::Leaf { keys, values } => {
+                                state.keys = keys.into();
+                                state.values = values.into();
+                                break 'outer;
+                            }
+                        }
+                    }
+                } else {
+                    state.to_visit.pop();
+                }
+            }
+        }
+
+        if let Some(key) = state.keys.pop_back() {
+            if self.bounds.contains(&key) {
+                let ret = state
+                    .values
+                    .pop_back()
+                    .expect("there should be the same number of keys and values")
+                    .load(self.loader)?;
+                return Ok(Some(ret));
+            } else {
+                return Ok(None);
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>> Iterator
+    for Range<'a, K, V, L, B>
+{
+    type Item = Result<V, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.get_next().transpose()
+    }
+}
+
+impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>
+    DoubleEndedIterator for Range<'a, K, V, L, B>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.get_next_back().transpose()
+    }
+}
+
 impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     /// Creates a new, empty B-tree.
     pub fn new() -> Self {
@@ -169,6 +413,15 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                 Err(_) => None,
             }),
         }
+    }
+
+    /// Gets a range of items from the B-tree.
+    pub fn get_range<'a, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>(
+        &'a self,
+        loader: &'a mut L,
+        bounds: B,
+    ) -> Range<'a, K, V, L, B> {
+        Range::new(self, loader, bounds)
     }
 
     /// Inserts a new item into the B-tree or updates an existing one. `value` is a function that
@@ -496,6 +749,81 @@ mod tests {
             }
             root.assert_invariants(&mut storage);
             assert_eq!(root.get(&mut storage, &i).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn test_tree_range() {
+        let mut storage = Storage;
+
+        let mut root = Tree::<i32, String>::new();
+
+        // insert some arbitrary values
+        for i in 0..100 {
+            let (new_root, _) = root.insert(&mut storage, i, i.to_string()).unwrap();
+            root = new_root;
+            root.assert_invariants(&mut storage);
+        }
+
+        // get some forward ranges
+        for i in 0..100 {
+            assert_eq!(
+                root.get_range(&mut storage, i..)
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                (i..100).map(|n| n.to_string()).collect::<Vec<_>>()
+            );
+
+            assert_eq!(
+                root.get_range(&mut storage, i..(i + 10))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                (i..i + 10)
+                    .filter_map(|n| if n < 100 { Some(n.to_string()) } else { None })
+                    .collect::<Vec<_>>()
+            );
+
+            assert_eq!(
+                root.get_range(&mut storage, i..=(i + 10))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                (i..=i + 10)
+                    .filter_map(|n| if n < 100 { Some(n.to_string()) } else { None })
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        // get some backward ranges
+        for i in 0..100 {
+            assert_eq!(
+                root.get_range(&mut storage, i..)
+                    .rev()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                (i..100).rev().map(|n| n.to_string()).collect::<Vec<_>>()
+            );
+
+            assert_eq!(
+                root.get_range(&mut storage, i..(i + 10))
+                    .rev()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                (i..i + 10)
+                    .rev()
+                    .filter_map(|n| if n < 100 { Some(n.to_string()) } else { None })
+                    .collect::<Vec<_>>()
+            );
+
+            assert_eq!(
+                root.get_range(&mut storage, i..=(i + 10))
+                    .rev()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                (i..=i + 10)
+                    .rev()
+                    .filter_map(|n| if n < 100 { Some(n.to_string()) } else { None })
+                    .collect::<Vec<_>>()
+            );
         }
     }
 }

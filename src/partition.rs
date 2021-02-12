@@ -1,7 +1,7 @@
 use super::{
     append_only_file::{self, AppendOnlyFile},
     b_tree::{self, Tree as BTree},
-    b_tree_2d,
+    b_tree_2d::{self, Range},
 };
 use anyhow::{Context, Error, Result};
 use bytes::Bytes;
@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     convert::{TryFrom, TryInto},
     io::{Read, Seek, SeekFrom},
+    ops::RangeBounds,
     path::Path,
 };
 
@@ -55,6 +56,13 @@ pub enum Scalar {
     Int(i64),
 }
 
+#[cfg(test)]
+impl From<&str> for Scalar {
+    fn from(s: &str) -> Scalar {
+        Scalar::Bytes(s.as_bytes().to_vec().into())
+    }
+}
+
 #[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     Bytes(Bytes),
@@ -62,10 +70,24 @@ pub enum Value {
     Set(Vec<Scalar>),
 }
 
-type BTree2D = b_tree_2d::Tree<Hash, Bytes, Value>;
+#[derive(Clone, Debug, Ord, Hash, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Sort {
+    Min,
+    Scalar(Scalar),
+    Max,
+}
 
-pub type Key = b_tree_2d::Key<Hash, Bytes>;
-pub type PrimaryKey = b_tree_2d::PrimaryKey<Hash, Bytes>;
+impl Into<Sort> for Scalar {
+    fn into(self) -> Sort {
+        Sort::Scalar(self)
+    }
+}
+
+type BTree2D = b_tree_2d::Tree<Hash, Sort, Value>;
+
+pub type Key = b_tree_2d::Key<Hash, Sort>;
+pub type PrimaryKey = b_tree_2d::PrimaryKey<Hash, Sort>;
+pub type SecondaryKey = b_tree_2d::SecondaryKey<Hash, Sort>;
 
 pub struct Partition {
     f: AppendOnlyFile,
@@ -113,6 +135,22 @@ impl<'a> Tree<'a> {
         Ok(self.inner.get(&mut self.loader, key)?)
     }
 
+    pub fn get_range_by_primary_key<B: RangeBounds<PrimaryKey>>(
+        &mut self,
+        bounds: B,
+    ) -> Range<'a, PrimaryKey, Sort, Value, Loader, B> {
+        self.inner
+            .get_range_by_primary_key(&mut self.loader, bounds)
+    }
+
+    pub fn get_range_by_secondary_key<B: RangeBounds<SecondaryKey>>(
+        &mut self,
+        bounds: B,
+    ) -> Range<'a, SecondaryKey, Sort, Value, Loader, B> {
+        self.inner
+            .get_range_by_secondary_key(&mut self.loader, bounds)
+    }
+
     pub fn insert<F: FnOnce(Option<&Value>) -> Option<Value>>(
         self,
         key: Key,
@@ -132,15 +170,15 @@ impl<'a> Tree<'a> {
     }
 }
 
-struct Loader<'a>(&'a mut AppendOnlyFile);
+pub struct Loader<'a>(&'a mut AppendOnlyFile);
 
-impl<'a> b_tree_2d::Loader<Hash, Bytes, Value> for Loader<'a> {
+impl<'a> b_tree_2d::Loader<Hash, Sort, Value> for Loader<'a> {
     type Error = Error;
 
     fn load_primary_node(
         &mut self,
         id: u64,
-    ) -> Result<b_tree_2d::PrimaryNode<Hash, Bytes, Value>, Self::Error> {
+    ) -> Result<b_tree_2d::PrimaryNode<Hash, Sort, Value>, Self::Error> {
         self.0
             .seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to primary node")?;
@@ -152,7 +190,7 @@ impl<'a> b_tree_2d::Loader<Hash, Bytes, Value> for Loader<'a> {
     fn load_secondary_node(
         &mut self,
         id: u64,
-    ) -> Result<b_tree_2d::SecondaryNode<Hash, Bytes, Value>, Self::Error> {
+    ) -> Result<b_tree_2d::SecondaryNode<Hash, Sort, Value>, Self::Error> {
         self.0
             .seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to secondary node")?;
@@ -161,7 +199,7 @@ impl<'a> b_tree_2d::Loader<Hash, Bytes, Value> for Loader<'a> {
         Ok(node.into())
     }
 
-    fn load_value(&mut self, id: u64) -> Result<b_tree_2d::Value<Bytes, Value>, Self::Error> {
+    fn load_value(&mut self, id: u64) -> Result<b_tree_2d::Value<Sort, Value>, Self::Error> {
         self.0
             .seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to value")?;

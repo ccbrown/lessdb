@@ -24,9 +24,12 @@ message Request {
         GetOperation get = 1;
         SetOperation set = 2;
         DeleteOperation delete = 3;
-        IncrementOperation increment = 4;
-        SetAddOperation set_add = 5;
-        SetRemoveOperation set_remove = 6;
+        SetAddOperation set_add = 4;
+        SetRemoveOperation set_remove = 5;
+        MapSetOperation map_set = 6;
+        MapDeleteOperation map_delete = 7;
+        GetMapRangeOperation get_map_range = 8;
+        GetMapRangeByFieldOperation get_map_range_by_field = 9;
     }
 }
 
@@ -51,11 +54,6 @@ message SetOperation {
     Condition condition = 3;
 }
 
-message IncrementOperation {
-    bytes key = 1;
-    sint64 amount = 2;
-}
-
 message SetAddOperation {
     bytes key = 1;
     repeated Scalar members = 2;
@@ -66,15 +64,53 @@ message SetRemoveOperation {
     repeated Scalar members = 2;
 }
 
+message MapSetOperation {
+    bytes key = 1;
+    Scalar field = 2;
+    Value value = 3;
+    Scalar order = 4;
+}
+
+message MapDeleteOperation {
+    bytes key = 1;
+    Scalar field = 2;
+}
+
+message Bound {
+    oneof value {
+        Scalar included = 1;
+        Scalar excluded = 2;
+    }
+}
+
+message GetMapRangeOperation {
+    bytes key = 1;
+    Bound start = 2;
+    Bound end = 3;
+    bool reverse = 4;
+    uint32 limit = 5;
+}
+
+message GetMapRangeByFieldOperation {
+    bytes key = 1;
+    Bound start = 2;
+    Bound end = 3;
+    bool reverse = 4;
+    uint32 limit = 5;
+}
+
 message Response {
     oneof body {
         Error error = 1;
         GetResult get = 2;
         SetResult set = 3;
         DeleteResult delete = 4;
-        IncrementResult increment = 5;
-        SetAddResult set_add = 6;
-        SetRemoveResult set_remove = 7;
+        SetAddResult set_add = 5;
+        SetRemoveResult set_remove = 6;
+        MapSetResult map_set = 7;
+        MapDeleteResult map_delete = 8;
+        GetMapRangeResult get_map_range = 9;
+        GetMapRangeByFieldResult get_map_range_by_field = 10;
     }
 }
 
@@ -98,10 +134,20 @@ message SetResult {
     bool did_set = 1;
 }
 
-message IncrementResult {
-    sint64 new_value = 1;
-}
-
 message SetAddResult {}
 
 message SetRemoveResult {}
+
+message MapSetResult {}
+
+message MapDeleteResult {
+    bool did_delete = 1;
+}
+
+message GetMapRangeResult {
+    repeated Value values = 1;
+}
+
+message GetMapRangeByFieldResult {
+    repeated Value values = 1;
+}

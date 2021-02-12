@@ -1,7 +1,12 @@
-use super::partition::{Hash, Key, Partition, PrimaryKey, Scalar, Value};
+use super::partition::{Hash, Key, Partition, PrimaryKey, Scalar, SecondaryKey, Sort, Value};
 use anyhow::{Context, Result};
-use bytes::Bytes;
-use std::{collections::HashSet, convert::TryInto, path::Path, sync::Mutex};
+use std::{
+    collections::HashSet,
+    convert::TryInto,
+    ops::{Bound, RangeBounds},
+    path::Path,
+    sync::Mutex,
+};
 
 const PARTITION_COUNT: usize = 1 << 16;
 
@@ -51,7 +56,7 @@ impl Node {
 
         let value = partition.tree().get(&PrimaryKey {
             hash: key.clone(),
-            sort: Bytes::new(),
+            sort: Sort::Min,
         })?;
         Ok(value)
     }
@@ -66,7 +71,7 @@ impl Node {
                 Key {
                     primary: PrimaryKey {
                         hash: key.clone(),
-                        sort: Bytes::new(),
+                        sort: Sort::Min,
                     },
                     secondary_sort: None,
                 },
@@ -91,38 +96,12 @@ impl Node {
         partition.commit(|tree| {
             let (tree, prev) = tree.delete(&PrimaryKey {
                 hash: key.clone(),
-                sort: Bytes::new(),
+                sort: Sort::Min,
             })?;
             did_delete = prev.is_some();
             Ok(tree)
         })?;
         Ok(did_delete)
-    }
-
-    pub fn increment(&self, key: Hash, amount: i64) -> Result<i64> {
-        let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
-
-        let mut new_value = 0;
-        partition.commit(|tree| {
-            Ok(tree.insert(
-                Key {
-                    primary: PrimaryKey {
-                        hash: key,
-                        sort: Bytes::new(),
-                    },
-                    secondary_sort: None,
-                },
-                |prev| {
-                    new_value = match prev {
-                        Some(Value::Int(prev)) => prev + amount,
-                        _ => amount,
-                    };
-                    Some(Value::Int(new_value))
-                },
-            )?)
-        })?;
-        Ok(new_value)
     }
 
     /// Adds one or more members to the set with the given key or creates it if it doesn't exist.
@@ -137,7 +116,7 @@ impl Node {
                 Key {
                     primary: PrimaryKey {
                         hash: key,
-                        sort: Bytes::new(),
+                        sort: Sort::Min,
                     },
                     secondary_sort: None,
                 },
@@ -175,7 +154,7 @@ impl Node {
                 Key {
                     primary: PrimaryKey {
                         hash: key,
-                        sort: Bytes::new(),
+                        sort: Sort::Min,
                     },
                     secondary_sort: None,
                 },
@@ -198,5 +177,152 @@ impl Node {
             )?)
         })?;
         Ok(())
+    }
+
+    /// Adds or updates a field in a map.
+    pub fn map_set(&self, key: Hash, field: Scalar, value: Value, order: Scalar) -> Result<()> {
+        let partition = &self.partitions[partition_number(&key)];
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+
+        partition.commit(|tree| {
+            Ok(tree.insert(
+                Key {
+                    primary: PrimaryKey {
+                        hash: key,
+                        sort: field.into(),
+                    },
+                    secondary_sort: Some(order.into()),
+                },
+                |_| Some(value),
+            )?)
+        })?;
+        Ok(())
+    }
+
+    /// Removes a field from a map.
+    pub fn map_delete(&self, key: Hash, field: Scalar) -> Result<bool> {
+        let partition = &self.partitions[partition_number(&key)];
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+
+        let mut did_delete = false;
+        partition.commit(|tree| {
+            let (tree, prev) = tree.delete(&PrimaryKey {
+                hash: key,
+                sort: field.into(),
+            })?;
+            did_delete = prev.is_some();
+            Ok(tree)
+        })?;
+        Ok(did_delete)
+    }
+
+    /// Gets entries in a map sorted by their prescribed order.
+    pub fn get_map_range<B: RangeBounds<Scalar>>(
+        &self,
+        key: Hash,
+        bounds: B,
+        limit: Option<usize>,
+        reverse: bool,
+    ) -> Result<Vec<Value>> {
+        let partition = &self.partitions[partition_number(&key)];
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+
+        let start = match bounds.start_bound() {
+            Bound::Unbounded => Bound::Included(SecondaryKey {
+                hash: key.clone(),
+                secondary_sort: Sort::Min,
+                primary_sort: Sort::Min,
+            }),
+            Bound::Included(sort) => Bound::Included(SecondaryKey {
+                hash: key.clone(),
+                secondary_sort: Sort::Scalar(sort.clone()),
+                primary_sort: Sort::Min,
+            }),
+            Bound::Excluded(sort) => Bound::Excluded(SecondaryKey {
+                hash: key.clone(),
+                secondary_sort: Sort::Scalar(sort.clone()),
+                primary_sort: Sort::Min,
+            }),
+        };
+
+        let end = match bounds.end_bound() {
+            Bound::Unbounded => Bound::Included(SecondaryKey {
+                hash: key,
+                secondary_sort: Sort::Max,
+                primary_sort: Sort::Max,
+            }),
+            Bound::Included(sort) => Bound::Included(SecondaryKey {
+                hash: key,
+                secondary_sort: Sort::Scalar(sort.clone()),
+                primary_sort: Sort::Max,
+            }),
+            Bound::Excluded(sort) => Bound::Excluded(SecondaryKey {
+                hash: key,
+                secondary_sort: Sort::Scalar(sort.clone()),
+                primary_sort: Sort::Max,
+            }),
+        };
+
+        let mut tree = partition.tree();
+        let range = tree.get_range_by_secondary_key((start, end));
+
+        match (limit, reverse) {
+            (Some(limit), true) => range.rev().take(limit).collect(),
+            (Some(limit), false) => range.take(limit).collect(),
+            (None, true) => range.rev().collect(),
+            (None, false) => range.collect(),
+        }
+    }
+
+    /// Gets entries in a map sorted by their fields.
+    pub fn get_map_range_by_field<B: RangeBounds<Scalar>>(
+        &self,
+        key: Hash,
+        bounds: B,
+        limit: Option<usize>,
+        reverse: bool,
+    ) -> Result<Vec<Value>> {
+        let partition = &self.partitions[partition_number(&key)];
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+
+        let start = match bounds.start_bound() {
+            Bound::Unbounded => Bound::Included(PrimaryKey {
+                hash: key.clone(),
+                sort: Sort::Min,
+            }),
+            Bound::Included(sort) => Bound::Included(PrimaryKey {
+                hash: key.clone(),
+                sort: Sort::Scalar(sort.clone()),
+            }),
+            Bound::Excluded(sort) => Bound::Excluded(PrimaryKey {
+                hash: key.clone(),
+                sort: Sort::Scalar(sort.clone()),
+            }),
+        };
+
+        let end = match bounds.end_bound() {
+            Bound::Unbounded => Bound::Included(PrimaryKey {
+                hash: key,
+                sort: Sort::Max,
+            }),
+            Bound::Included(sort) => Bound::Included(PrimaryKey {
+                hash: key,
+                sort: Sort::Scalar(sort.clone()),
+            }),
+            Bound::Excluded(sort) => Bound::Excluded(PrimaryKey {
+                hash: key,
+                sort: Sort::Scalar(sort.clone()),
+            }),
+        };
+
+        let mut tree = partition.tree();
+        let range = tree.get_range_by_primary_key((start, end));
+
+        match (limit, reverse) {
+            (Some(limit), true) => range.rev().take(limit).collect(),
+            (Some(limit), false) => range.take(limit).collect(),
+            (None, true) => range.rev().collect(),
+            (None, false) => range.collect(),
+        }
     }
 }
