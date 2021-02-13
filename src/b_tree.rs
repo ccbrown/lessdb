@@ -11,10 +11,7 @@ pub enum Tree<K: Clone, V: Clone> {
 }
 
 impl<K: Clone, V: Clone> Tree<K, V> {
-    pub fn load_node<E, L: Loader<K, V, Error = E>>(
-        &self,
-        loader: &mut L,
-    ) -> Result<Node<K, V>, E> {
+    pub fn load_node<E, L: Loader<K, V, Error = E>>(&self, loader: &L) -> Result<Node<K, V>, E> {
         match self {
             Self::Persisted { id } => loader.load_node(*id),
             Self::Volatile { node, .. } => Ok(node.clone()),
@@ -36,7 +33,7 @@ pub enum Value<V> {
 }
 
 impl<V: Clone> Value<V> {
-    pub fn load<E, K: Clone, L: Loader<K, V, Error = E>>(self, loader: &mut L) -> Result<V, E> {
+    pub fn load<E, K: Clone, L: Loader<K, V, Error = E>>(self, loader: &L) -> Result<V, E> {
         match self {
             Self::Persisted { id } => loader.load_value(id),
             Self::Volatile { value, .. } => Ok(value),
@@ -190,8 +187,8 @@ impl<K: Clone + Ord, V: Clone> Node<K, V> {
 pub trait Loader<K: Clone, V: Clone> {
     type Error;
 
-    fn load_node(&mut self, id: u64) -> Result<Node<K, V>, Self::Error>;
-    fn load_value(&mut self, id: u64) -> Result<V, Self::Error>;
+    fn load_node(&self, id: u64) -> Result<Node<K, V>, Self::Error>;
+    fn load_value(&self, id: u64) -> Result<V, Self::Error>;
 }
 
 struct Deletion<K: Clone, V: Clone> {
@@ -202,7 +199,7 @@ struct Deletion<K: Clone, V: Clone> {
 
 pub struct Range<'a, K: Clone, V: Clone, L, B> {
     tree: &'a Tree<K, V>,
-    loader: &'a mut L,
+    loader: &'a L,
     bounds: B,
     forward: Option<IteratorState<K, V>>,
     backward: Option<IteratorState<K, V>>,
@@ -217,7 +214,7 @@ struct IteratorState<K: Clone, V: Clone> {
 impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>
     Range<'a, K, V, L, B>
 {
-    fn new(tree: &'a Tree<K, V>, loader: &'a mut L, bounds: B) -> Self {
+    fn new(tree: &'a Tree<K, V>, loader: &'a L, bounds: B) -> Self {
         Self {
             tree,
             loader,
@@ -230,7 +227,7 @@ impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds
     /// Initializes the range state by finding the first leaf node that might be within the range.
     /// Any values encountered by advancing through the returned state are guaranteed to not come
     /// before the range.
-    fn init_forward_state(&mut self) -> Result<IteratorState<K, V>, E> {
+    fn init_forward_state(&self) -> Result<IteratorState<K, V>, E> {
         let mut to_visit = vec![];
         let mut node = self.tree.load_node(self.loader)?;
         loop {
@@ -319,7 +316,7 @@ impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds
     /// Initializes the range state by finding the last leaf node that might be within the range.
     /// Any values encountered by advancing backward through the returned state are guaranteed to
     /// not come after the range.
-    fn init_backward_state(&mut self) -> Result<IteratorState<K, V>, E> {
+    fn init_backward_state(&self) -> Result<IteratorState<K, V>, E> {
         let mut to_visit = vec![];
         let mut node = self.tree.load_node(self.loader)?;
         loop {
@@ -441,7 +438,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     /// Counts items from the B-tree without loading them.
     pub fn count<'a, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>(
         &'a self,
-        loader: &'a mut L,
+        loader: &'a L,
         bounds: B,
     ) -> Result<u64, E> {
         Ok(match self.load_node(loader)? {
@@ -484,7 +481,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
         })
     }
 
-    pub fn is_empty<E, L: Loader<K, V, Error = E>>(&self, loader: &mut L) -> Result<bool, E> {
+    pub fn is_empty<E, L: Loader<K, V, Error = E>>(&self, loader: &L) -> Result<bool, E> {
         Ok(match self.load_node(loader)? {
             Node::Internal { .. } => false,
             Node::Leaf { values, .. } => values.is_empty(),
@@ -492,11 +489,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     }
 
     /// Gets an item from the B-tree, if it exists.
-    pub fn get<E, L: Loader<K, V, Error = E>>(
-        &self,
-        loader: &mut L,
-        key: &K,
-    ) -> Result<Option<V>, E> {
+    pub fn get<E, L: Loader<K, V, Error = E>>(&self, loader: &L, key: &K) -> Result<Option<V>, E> {
         match self.load_node(loader)? {
             Node::Internal { index, children } => match index.binary_search(&key) {
                 Ok(i) => children[i + 1].tree.get(loader, key),
@@ -512,7 +505,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     /// Gets a range of items from the B-tree.
     pub fn get_range<'a, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>(
         &'a self,
-        loader: &'a mut L,
+        loader: &'a L,
         bounds: B,
     ) -> Range<'a, K, V, L, B> {
         Range::new(self, loader, bounds)
@@ -523,7 +516,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     /// Otherwise the item is updated and its previous value is returned.
     pub fn insert<E, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &mut L,
+        loader: &L,
         key: K,
         value: V,
     ) -> Result<(Self, Option<Value<V>>), E> {
@@ -538,10 +531,10 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     pub fn insert_conditionally<
         E,
         L: Loader<K, V, Error = E>,
-        F: FnOnce(&mut L, Option<&Value<V>>) -> Result<Option<V>, E>,
+        F: FnOnce(&L, Option<&Value<V>>) -> Result<Option<V>, E>,
     >(
         &self,
-        loader: &mut L,
+        loader: &L,
         key: K,
         value: F,
     ) -> Result<Option<(Self, Option<Value<V>>)>, E> {
@@ -564,10 +557,10 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     fn insert_impl<
         E,
         L: Loader<K, V, Error = E>,
-        F: FnOnce(&mut L, Option<&Value<V>>) -> Result<Option<V>, E>,
+        F: FnOnce(&L, Option<&Value<V>>) -> Result<Option<V>, E>,
     >(
         &self,
-        loader: &mut L,
+        loader: &L,
         key: K,
         value: F,
     ) -> Result<Option<(Node<K, V>, Option<Value<V>>)>, E> {
@@ -628,7 +621,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     /// Deletes an item from the B-tree. If the item existed, its previous value is returned.
     pub fn delete<E, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &mut L,
+        loader: &L,
         key: &K,
     ) -> Result<(Self, Option<Value<V>>), E> {
         Ok(match self.delete_impl(loader, key)? {
@@ -649,7 +642,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
 
     fn delete_impl<E, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &mut L,
+        loader: &L,
         key: &K,
     ) -> Result<Option<Deletion<K, V>>, E> {
         Ok(match self.load_node(loader)? {
@@ -743,17 +736,14 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     }
 
     #[cfg(test)]
-    pub fn assert_invariants<E: std::fmt::Debug, L: Loader<K, V, Error = E>>(
-        &self,
-        loader: &mut L,
-    ) {
+    pub fn assert_invariants<E: std::fmt::Debug, L: Loader<K, V, Error = E>>(&self, loader: &L) {
         self.assert_invariants_impl(loader, true)
     }
 
     #[cfg(test)]
     pub fn assert_invariants_impl<E: std::fmt::Debug, L: Loader<K, V, Error = E>>(
         &self,
-        loader: &mut L,
+        loader: &L,
         is_root: bool,
     ) {
         match self.load_node(loader).unwrap() {
@@ -790,91 +780,91 @@ mod tests {
     impl Loader<i32, String> for Storage {
         type Error = anyhow::Error;
 
-        fn load_node(&mut self, _id: u64) -> Result<Node<i32, String>, Self::Error> {
+        fn load_node(&self, _id: u64) -> Result<Node<i32, String>, Self::Error> {
             panic!("the tests don't persist nodes")
         }
 
-        fn load_value(&mut self, _id: u64) -> Result<String, Self::Error> {
+        fn load_value(&self, _id: u64) -> Result<String, Self::Error> {
             panic!("the tests don't persist values")
         }
     }
 
     #[test]
     fn test_tree() {
-        let mut storage = Storage;
+        let storage = Storage;
 
         let mut root = Tree::<i32, String>::new();
-        assert_eq!(root.get(&mut storage, &1).unwrap(), None);
+        assert_eq!(root.get(&storage, &1).unwrap(), None);
 
         // insert some arbitrary values
         for i in (100..900).step_by(10) {
-            let (new_root, prev) = root.insert(&mut storage, i, i.to_string()).unwrap();
+            let (new_root, prev) = root.insert(&storage, i, i.to_string()).unwrap();
             assert_eq!(
-                new_root.count(&mut storage, ..).unwrap(),
-                root.count(&mut storage, ..).unwrap() + 1
+                new_root.count(&storage, ..).unwrap(),
+                root.count(&storage, ..).unwrap() + 1
             );
             root = new_root;
             assert_eq!(prev.is_none(), true);
-            root.assert_invariants(&mut storage);
+            root.assert_invariants(&storage);
         }
 
         for i in (0..1000).step_by(9) {
             // test inserting the value
-            let (new_root, _) = root.insert(&mut storage, i, "-1".to_string()).unwrap();
+            let (new_root, _) = root.insert(&storage, i, "-1".to_string()).unwrap();
             root = new_root;
-            root.assert_invariants(&mut storage);
-            assert_eq!(root.get(&mut storage, &i).unwrap(), Some("-1".to_string()));
+            root.assert_invariants(&storage);
+            assert_eq!(root.get(&storage, &i).unwrap(), Some("-1".to_string()));
 
             // test updating the value
-            let (new_root, prev) = root.insert(&mut storage, i, i.to_string()).unwrap();
+            let (new_root, prev) = root.insert(&storage, i, i.to_string()).unwrap();
             root = new_root;
-            root.assert_invariants(&mut storage);
+            root.assert_invariants(&storage);
             assert_eq!(
                 prev,
                 Some(Value::Volatile {
                     value: "-1".to_string()
                 })
             );
-            assert_eq!(root.get(&mut storage, &i).unwrap(), Some(i.to_string()));
+            assert_eq!(root.get(&storage, &i).unwrap(), Some(i.to_string()));
         }
 
         // test deleting values
         for i in (0..1000).step_by(3) {
-            let len_before = root.count(&mut storage, ..).unwrap();
-            let (root, prev) = root.delete(&mut storage, &i).unwrap();
+            let len_before = root.count(&storage, ..).unwrap();
+            let (root, prev) = root.delete(&storage, &i).unwrap();
             if i % 9 == 0 {
-                assert_eq!(root.count(&mut storage, ..).unwrap(), len_before - 1);
+                assert_eq!(root.count(&storage, ..).unwrap(), len_before - 1);
                 assert_eq!(prev.is_some(), true);
             }
-            root.assert_invariants(&mut storage);
-            assert_eq!(root.get(&mut storage, &i).unwrap(), None);
+            root.assert_invariants(&storage);
+            assert_eq!(root.get(&storage, &i).unwrap(), None);
         }
     }
 
     #[test]
     fn test_tree_range() {
-        let mut storage = Storage;
+        let storage = Storage;
 
         let mut root = Tree::<i32, String>::new();
 
         // insert some arbitrary values
         for i in 0..100 {
-            let (new_root, _) = root.insert(&mut storage, i, i.to_string()).unwrap();
+            let (new_root, _) = root.insert(&storage, i, i.to_string()).unwrap();
             root = new_root;
-            root.assert_invariants(&mut storage);
+            root.assert_invariants(&storage);
         }
 
         // get some forward ranges
         for i in 0..100 {
             assert_eq!(
-                root.get_range(&mut storage, i..)
+                root.get_range(&storage, i..)
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap(),
                 (i..100).map(|n| n.to_string()).collect::<Vec<_>>()
             );
 
             assert_eq!(
-                root.get_range(&mut storage, i..(i + 10))
+                root.get_range(&storage, i..(i + 10))
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap(),
                 (i..i + 10)
@@ -883,7 +873,7 @@ mod tests {
             );
 
             assert_eq!(
-                root.get_range(&mut storage, i..=(i + 10))
+                root.get_range(&storage, i..=(i + 10))
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap(),
                 (i..=i + 10)
@@ -895,7 +885,7 @@ mod tests {
         // get some backward ranges
         for i in 0..100 {
             assert_eq!(
-                root.get_range(&mut storage, i..)
+                root.get_range(&storage, i..)
                     .rev()
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap(),
@@ -903,7 +893,7 @@ mod tests {
             );
 
             assert_eq!(
-                root.get_range(&mut storage, i..(i + 10))
+                root.get_range(&storage, i..(i + 10))
                     .rev()
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap(),
@@ -914,7 +904,7 @@ mod tests {
             );
 
             assert_eq!(
-                root.get_range(&mut storage, i..=(i + 10))
+                root.get_range(&storage, i..=(i + 10))
                     .rev()
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap(),
@@ -928,24 +918,24 @@ mod tests {
 
     #[test]
     fn test_tree_count() {
-        let mut storage = Storage;
+        let storage = Storage;
 
         let mut root = Tree::<i32, String>::new();
 
         // insert some arbitrary values
         for i in 25..75 {
-            let (new_root, _) = root.insert(&mut storage, i, i.to_string()).unwrap();
+            let (new_root, _) = root.insert(&storage, i, i.to_string()).unwrap();
             root = new_root;
-            root.assert_invariants(&mut storage);
+            root.assert_invariants(&storage);
         }
 
         // check some counts
         for i in 0..100 {
             let expected_ge = 75 - i.max(25).min(75) as u64;
-            assert_eq!(root.count(&mut storage, i..).unwrap(), expected_ge);
+            assert_eq!(root.count(&storage, i..).unwrap(), expected_ge);
 
             assert_eq!(
-                root.count(&mut storage, i..(i + 10)).unwrap(),
+                root.count(&storage, i..(i + 10)).unwrap(),
                 expected_ge.min(10).min(i.max(15) as u64 - 15)
             );
         }

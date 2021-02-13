@@ -11,6 +11,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     ops::RangeBounds,
     path::Path,
+    sync::{Arc, Mutex},
 };
 
 pub const HASH_LENGTH: usize = 32;
@@ -97,7 +98,7 @@ pub type PrimaryKey = b_tree_2d::PrimaryKey<Hash, Sort>;
 pub type SecondaryKey = b_tree_2d::SecondaryKey<Hash, Sort>;
 
 pub struct Partition {
-    f: AppendOnlyFile,
+    f: Arc<Mutex<AppendOnlyFile>>,
     tree: BTree2D,
 }
 
@@ -137,18 +138,18 @@ impl<K: Clone + Serialize, V: Clone> Into<b_tree::Node<K, V>> for Node<K> {
     }
 }
 
-pub struct Tree<'a> {
-    loader: Loader<'a>,
+pub struct Tree {
+    loader: Loader,
     inner: BTree2D,
 }
 
-impl<'a> Tree<'a> {
+impl Tree {
     fn into_inner(self) -> BTree2D {
         self.inner
     }
 
-    pub fn clear(mut self) -> Result<Self> {
-        Ok(if self.inner.is_empty(&mut self.loader)? {
+    pub fn clear(self) -> Result<Self> {
+        Ok(if self.inner.is_empty(&self.loader)? {
             self
         } else {
             Self {
@@ -158,40 +159,34 @@ impl<'a> Tree<'a> {
         })
     }
 
-    pub fn get(&mut self, key: &PrimaryKey) -> Result<Option<Value>> {
-        Ok(self.inner.get(&mut self.loader, key)?)
+    pub fn get(&self, key: &PrimaryKey) -> Result<Option<Value>> {
+        Ok(self.inner.get(&self.loader, key)?)
     }
 
     pub fn get_range_by_primary_key<B: RangeBounds<PrimaryKey>>(
-        &mut self,
+        &self,
         bounds: B,
-    ) -> Range<'a, PrimaryKey, Sort, Value, Loader, B> {
-        self.inner
-            .get_range_by_primary_key(&mut self.loader, bounds)
+    ) -> Range<PrimaryKey, Sort, Value, Loader, B> {
+        self.inner.get_range_by_primary_key(&self.loader, bounds)
     }
 
-    pub fn count_range_by_primary_key<B: RangeBounds<PrimaryKey>>(
-        &mut self,
-        bounds: B,
-    ) -> Result<u64> {
-        self.inner
-            .count_range_by_primary_key(&mut self.loader, bounds)
+    pub fn count_range_by_primary_key<B: RangeBounds<PrimaryKey>>(&self, bounds: B) -> Result<u64> {
+        self.inner.count_range_by_primary_key(&self.loader, bounds)
     }
 
     pub fn get_range_by_secondary_key<B: RangeBounds<SecondaryKey>>(
-        &mut self,
+        &self,
         bounds: B,
-    ) -> Range<'a, SecondaryKey, Sort, Value, Loader, B> {
-        self.inner
-            .get_range_by_secondary_key(&mut self.loader, bounds)
+    ) -> Range<SecondaryKey, Sort, Value, Loader, B> {
+        self.inner.get_range_by_secondary_key(&self.loader, bounds)
     }
 
     pub fn count_range_by_secondary_key<B: RangeBounds<SecondaryKey>>(
-        &mut self,
+        &self,
         bounds: B,
     ) -> Result<u64> {
         self.inner
-            .count_range_by_secondary_key(&mut self.loader, bounds)
+            .count_range_by_secondary_key(&self.loader, bounds)
     }
 
     pub fn insert<F: FnOnce(Option<&Value>) -> Option<Value>>(
@@ -213,40 +208,40 @@ impl<'a> Tree<'a> {
     }
 }
 
-pub struct Loader<'a>(&'a mut AppendOnlyFile);
+pub struct Loader(Arc<Mutex<AppendOnlyFile>>);
 
-impl<'a> b_tree_2d::Loader<Hash, Sort, Value> for Loader<'a> {
+impl<'a> b_tree_2d::Loader<Hash, Sort, Value> for Loader {
     type Error = Error;
 
     fn load_primary_node(
-        &mut self,
+        &self,
         id: u64,
     ) -> Result<b_tree_2d::PrimaryNode<Hash, Sort, Value>, Self::Error> {
-        self.0
-            .seek(SeekFrom::Start(id))
+        let mut f = self.0.lock().expect("the lock should not be poisoned");
+        f.seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to primary node")?;
-        let node: Node<_> = rmp_serde::from_read(&mut self.0)
+        let node: Node<_> = rmp_serde::from_read(&mut *f)
             .with_context(|| format!("unable to deserialize primary node at offset {}", id))?;
         Ok(node.into())
     }
 
     fn load_secondary_node(
-        &mut self,
+        &self,
         id: u64,
     ) -> Result<b_tree_2d::SecondaryNode<Hash, Sort, Value>, Self::Error> {
-        self.0
-            .seek(SeekFrom::Start(id))
+        let mut f = self.0.lock().expect("the lock should not be poisoned");
+        f.seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to secondary node")?;
-        let node: Node<_> = rmp_serde::from_read(&mut self.0)
+        let node: Node<_> = rmp_serde::from_read(&mut *f)
             .with_context(|| format!("unable to deserialize secondary node at offset {}", id))?;
         Ok(node.into())
     }
 
-    fn load_value(&mut self, id: u64) -> Result<b_tree_2d::Value<Sort, Value>, Self::Error> {
-        self.0
-            .seek(SeekFrom::Start(id))
+    fn load_value(&self, id: u64) -> Result<b_tree_2d::Value<Sort, Value>, Self::Error> {
+        let mut f = self.0.lock().expect("the lock should not be poisoned");
+        f.seek(SeekFrom::Start(id))
             .with_context(|| "unable to seek to value")?;
-        Ok(rmp_serde::from_read(&mut self.0)
+        Ok(rmp_serde::from_read(&mut *f)
             .with_context(|| format!("unable to deserialize value at offset {}", id))?)
     }
 }
@@ -266,7 +261,10 @@ impl Partition {
             }
             None => BTree2D::new(),
         };
-        Ok(Self { f, tree })
+        Ok(Self {
+            f: Arc::new(Mutex::new(f)),
+            tree,
+        })
     }
 
     fn deserialize_tree<R: Read>(mut r: R) -> Result<BTree2D> {
@@ -353,9 +351,9 @@ impl Partition {
     }
 
     /// Gets a snapshot of the tree, which can be used for reads.
-    pub fn tree(&mut self) -> Tree {
+    pub fn tree(&self) -> Tree {
         Tree {
-            loader: Loader(&mut self.f),
+            loader: Loader(self.f.clone()),
             inner: self.tree.clone(),
         }
     }
@@ -363,18 +361,18 @@ impl Partition {
     /// Makes a modification to the tree and commits it to disk.
     pub fn commit<F: FnOnce(Tree) -> Result<Tree>>(&mut self, f: F) -> Result<()> {
         let tree = f(Tree {
-            loader: Loader(&mut self.f),
+            loader: Loader(self.f.clone()),
             inner: self.tree.clone(),
         })?;
         let tree = tree.into_inner();
         if !tree.is_persisted() {
+            let mut f = self.f.lock().expect("the lock should not be poisoned");
             let (tree, buf) = Self::serialize_tree(
                 tree,
-                self.f.size() + append_only_file::ENTRY_PREFIX_LENGTH as u64,
+                f.size() + append_only_file::ENTRY_PREFIX_LENGTH as u64,
             )
             .with_context(|| "unable to serialize tree")?;
-            self.f
-                .append(&buf)
+            f.append(&buf)
                 .with_context(|| "unable to append tree to append-only file")?;
             self.tree = tree;
         }
@@ -424,7 +422,7 @@ mod tests {
 
         // make sure the data is still there
         {
-            let mut partition = Partition::open(&path).unwrap();
+            let partition = Partition::open(&path).unwrap();
 
             assert_eq!(
                 partition.tree().get(&primary_key("foo", "a")).unwrap(),

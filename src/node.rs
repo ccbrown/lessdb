@@ -5,7 +5,7 @@ use std::{
     convert::TryInto,
     ops::{Bound, RangeBounds},
     path::Path,
-    sync::Mutex,
+    sync::RwLock,
 };
 
 const PARTITION_COUNT: usize = 1 << 12;
@@ -19,7 +19,7 @@ pub fn partition_number(hash: &Hash) -> usize {
 }
 
 pub struct Node {
-    partitions: Vec<Mutex<Partition>>,
+    partitions: Vec<RwLock<Partition>>,
 }
 
 pub enum SetCondition {
@@ -41,7 +41,7 @@ impl Node {
         Ok(Self {
             partitions: (0..PARTITION_COUNT)
                 .map(|i| {
-                    Ok(Mutex::new(
+                    Ok(RwLock::new(
                         Partition::open(data_path.as_ref().join(format!("partition-{:08}", i)))
                             .with_context(|| format!("unable to open partition {}", i))?,
                     ))
@@ -55,7 +55,7 @@ impl Node {
     /// purposes and there's probably no good reason to use it production.
     pub fn clear_partitions(&self) -> Result<()> {
         for partition in &self.partitions {
-            let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+            let mut partition = partition.write().expect("the lock shouldn't be poisoned");
             partition.commit(|tree| Ok(tree.clear()?))?;
         }
         Ok(())
@@ -63,7 +63,7 @@ impl Node {
 
     pub fn get(&self, key: &Hash) -> Result<Option<Value>> {
         let partition = &self.partitions[partition_number(key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let partition = partition.read().expect("the lock shouldn't be poisoned");
 
         let value = partition.tree().get(&PrimaryKey {
             hash: key.clone(),
@@ -74,7 +74,7 @@ impl Node {
 
     pub fn set(&self, key: Hash, value: Value, condition: Option<SetCondition>) -> Result<bool> {
         let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let mut partition = partition.write().expect("the lock shouldn't be poisoned");
 
         let mut did_set = false;
         partition.commit(|tree| {
@@ -101,7 +101,7 @@ impl Node {
 
     pub fn delete(&self, key: &Hash) -> Result<bool> {
         let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let mut partition = partition.write().expect("the lock shouldn't be poisoned");
 
         let mut did_delete = false;
         partition.commit(|tree| {
@@ -120,7 +120,7 @@ impl Node {
         let to_add: HashSet<Scalar> = members.into_iter().collect();
 
         let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let mut partition = partition.write().expect("the lock shouldn't be poisoned");
 
         partition.commit(|tree| {
             Ok(tree.insert(
@@ -158,7 +158,7 @@ impl Node {
         let to_remove: HashSet<Scalar> = members.into_iter().collect();
 
         let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let mut partition = partition.write().expect("the lock shouldn't be poisoned");
 
         partition.commit(|tree| {
             Ok(tree.insert(
@@ -193,7 +193,7 @@ impl Node {
     /// Adds or updates a field in a map.
     pub fn map_set(&self, key: Hash, field: Scalar, value: Value, order: Scalar) -> Result<()> {
         let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let mut partition = partition.write().expect("the lock shouldn't be poisoned");
 
         partition.commit(|tree| {
             Ok(tree.insert(
@@ -213,7 +213,7 @@ impl Node {
     /// Removes a field from a map.
     pub fn map_delete(&self, key: Hash, field: Scalar) -> Result<bool> {
         let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let mut partition = partition.write().expect("the lock shouldn't be poisoned");
 
         let mut did_delete = false;
         partition.commit(|tree| {
@@ -281,9 +281,9 @@ impl Node {
         let partition = &self.partitions[partition_number(&key)];
         let (start, end) = Self::map_range_bounds(key, bounds);
 
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let partition = partition.read().expect("the lock shouldn't be poisoned");
 
-        let mut tree = partition.tree();
+        let tree = partition.tree();
         let range = tree.get_range_by_secondary_key((start, end));
 
         match (limit, reverse) {
@@ -299,7 +299,7 @@ impl Node {
         let partition = &self.partitions[partition_number(&key)];
         let (start, end) = Self::map_range_bounds(key, bounds);
 
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let partition = partition.read().expect("the lock shouldn't be poisoned");
         partition.tree().count_range_by_secondary_key((start, end))
     }
 
@@ -351,9 +351,9 @@ impl Node {
         let partition = &self.partitions[partition_number(&key)];
         let (start, end) = Self::map_range_by_field_bounds(key, bounds);
 
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let partition = partition.read().expect("the lock shouldn't be poisoned");
 
-        let mut tree = partition.tree();
+        let tree = partition.tree();
         let range = tree.get_range_by_primary_key((start, end));
 
         match (limit, reverse) {
@@ -373,7 +373,7 @@ impl Node {
         let partition = &self.partitions[partition_number(&key)];
         let (start, end) = Self::map_range_by_field_bounds(key, bounds);
 
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        let partition = partition.read().expect("the lock shouldn't be poisoned");
         partition.tree().count_range_by_primary_key((start, end))
     }
 }

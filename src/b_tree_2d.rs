@@ -42,9 +42,9 @@ pub struct Tree<H: Clone, S: Clone, V: Clone> {
 pub trait Loader<H: Clone, S: Clone, V: Clone> {
     type Error;
 
-    fn load_primary_node(&mut self, id: u64) -> Result<PrimaryNode<H, S, V>, Self::Error>;
-    fn load_secondary_node(&mut self, id: u64) -> Result<SecondaryNode<H, S, V>, Self::Error>;
-    fn load_value(&mut self, id: u64) -> Result<Value<S, V>, Self::Error>;
+    fn load_primary_node(&self, id: u64) -> Result<PrimaryNode<H, S, V>, Self::Error>;
+    fn load_secondary_node(&self, id: u64) -> Result<SecondaryNode<H, S, V>, Self::Error>;
+    fn load_value(&self, id: u64) -> Result<Value<S, V>, Self::Error>;
 }
 
 impl<H: Clone, S: Clone, V: Clone, E, L: Loader<H, S, V, Error = E>>
@@ -52,11 +52,11 @@ impl<H: Clone, S: Clone, V: Clone, E, L: Loader<H, S, V, Error = E>>
 {
     type Error = E;
 
-    fn load_node(&mut self, id: u64) -> Result<PrimaryNode<H, S, V>, Self::Error> {
+    fn load_node(&self, id: u64) -> Result<PrimaryNode<H, S, V>, Self::Error> {
         self.load_primary_node(id)
     }
 
-    fn load_value(&mut self, id: u64) -> Result<Value<S, V>, Self::Error> {
+    fn load_value(&self, id: u64) -> Result<Value<S, V>, Self::Error> {
         self.load_value(id)
     }
 }
@@ -66,11 +66,11 @@ impl<H: Clone, S: Clone, V: Clone, E, L: Loader<H, S, V, Error = E>>
 {
     type Error = E;
 
-    fn load_node(&mut self, id: u64) -> Result<SecondaryNode<H, S, V>, Self::Error> {
+    fn load_node(&self, id: u64) -> Result<SecondaryNode<H, S, V>, Self::Error> {
         self.load_secondary_node(id)
     }
 
-    fn load_value(&mut self, id: u64) -> Result<Value<S, V>, Self::Error> {
+    fn load_value(&self, id: u64) -> Result<Value<S, V>, Self::Error> {
         self.load_value(id)
     }
 }
@@ -118,7 +118,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         }
     }
 
-    pub fn is_empty<E, L: Loader<H, S, V, Error = E>>(&self, loader: &mut L) -> Result<bool, E> {
+    pub fn is_empty<E, L: Loader<H, S, V, Error = E>>(&self, loader: &L) -> Result<bool, E> {
         self.primary_tree.is_empty(loader)
     }
 
@@ -129,7 +129,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     /// Gets an item from the B-tree, if it exists.
     pub fn get<E, L: Loader<H, S, V, Error = E>>(
         &self,
-        loader: &mut L,
+        loader: &L,
         key: &PrimaryKey<H, S>,
     ) -> Result<Option<V>, E> {
         Ok(self.primary_tree.get(loader, key)?.map(|v| v.value.clone()))
@@ -143,7 +143,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         B: RangeBounds<PrimaryKey<H, S>>,
     >(
         &'a self,
-        loader: &'a mut L,
+        loader: &'a L,
         bounds: B,
     ) -> Range<'a, PrimaryKey<H, S>, S, V, L, B> {
         Range(self.primary_tree.get_range(loader, bounds))
@@ -157,7 +157,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         B: RangeBounds<PrimaryKey<H, S>>,
     >(
         &'a self,
-        loader: &'a mut L,
+        loader: &'a L,
         bounds: B,
     ) -> Result<u64, E> {
         self.primary_tree.count(loader, bounds)
@@ -171,7 +171,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         B: RangeBounds<SecondaryKey<H, S>>,
     >(
         &'a self,
-        loader: &'a mut L,
+        loader: &'a L,
         bounds: B,
     ) -> Range<'a, SecondaryKey<H, S>, S, V, L, B> {
         Range(self.secondary_tree.get_range(loader, bounds))
@@ -185,7 +185,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         B: RangeBounds<SecondaryKey<H, S>>,
     >(
         &'a self,
-        loader: &'a mut L,
+        loader: &'a L,
         bounds: B,
     ) -> Result<u64, E> {
         self.secondary_tree.count(loader, bounds)
@@ -194,7 +194,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     /// Inserts a new item into the B-tree or updates an existing one.
     pub fn insert<E, L: Loader<H, S, V, Error = E>, F: FnOnce(Option<&V>) -> Option<V>>(
         &self,
-        loader: &mut L,
+        loader: &L,
         key: Key<H, S>,
         value: F,
     ) -> Result<Self, E> {
@@ -262,7 +262,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     /// Deletes a new item from the B-tree. Returns the previous value if the item existed.
     pub fn delete<E, L: Loader<H, S, V, Error = E>>(
         &self,
-        loader: &mut L,
+        loader: &L,
         key: &PrimaryKey<H, S>,
     ) -> Result<(Self, Option<V>), E> {
         let (primary_tree, prev) = self.primary_tree.delete(loader, &key)?;
@@ -295,10 +295,7 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     }
 
     #[cfg(test)]
-    pub fn assert_invariants<E: std::fmt::Debug, L: Loader<H, S, V, Error = E>>(
-        &self,
-        loader: &mut L,
-    ) {
+    pub fn assert_invariants<E: std::fmt::Debug, L: Loader<H, S, V, Error = E>>(&self, loader: &L) {
         self.primary_tree.assert_invariants(loader);
         self.secondary_tree.assert_invariants(loader);
     }
@@ -314,31 +311,31 @@ mod tests {
         type Error = anyhow::Error;
 
         fn load_primary_node(
-            &mut self,
+            &self,
             _id: u64,
         ) -> Result<PrimaryNode<i32, i32, String>, Self::Error> {
             panic!("the tests don't persist nodes")
         }
 
         fn load_secondary_node(
-            &mut self,
+            &self,
             _id: u64,
         ) -> Result<SecondaryNode<i32, i32, String>, Self::Error> {
             panic!("the tests don't persist nodes")
         }
 
-        fn load_value(&mut self, _id: u64) -> Result<Value<i32, String>, Self::Error> {
+        fn load_value(&self, _id: u64) -> Result<Value<i32, String>, Self::Error> {
             panic!("the tests don't persist values")
         }
     }
 
     #[test]
     fn test_tree() {
-        let mut storage = Storage;
+        let storage = Storage;
 
         let mut root = Tree::<i32, i32, String>::new();
         assert_eq!(
-            root.get(&mut storage, &PrimaryKey { hash: 1, sort: 1 })
+            root.get(&storage, &PrimaryKey { hash: 1, sort: 1 })
                 .unwrap(),
             None
         );
@@ -353,38 +350,38 @@ mod tests {
         // insert some arbitrary values
         for i in (100..900).step_by(10) {
             root = root
-                .insert(&mut storage, key(i), |_| Some(i.to_string()))
+                .insert(&storage, key(i), |_| Some(i.to_string()))
                 .unwrap();
-            root.assert_invariants(&mut storage);
+            root.assert_invariants(&storage);
         }
 
         for i in (0..1000).step_by(9) {
             // test inserting the value
             root = root
-                .insert(&mut storage, key(i), |_| Some("-1".to_string()))
+                .insert(&storage, key(i), |_| Some("-1".to_string()))
                 .unwrap();
-            root.assert_invariants(&mut storage);
+            root.assert_invariants(&storage);
             assert_eq!(
-                root.get(&mut storage, &primary_key(i)).unwrap(),
+                root.get(&storage, &primary_key(i)).unwrap(),
                 Some("-1".to_string())
             );
 
             // test updating the value
             root = root
-                .insert(&mut storage, key(i), |_| Some(i.to_string()))
+                .insert(&storage, key(i), |_| Some(i.to_string()))
                 .unwrap();
-            root.assert_invariants(&mut storage);
+            root.assert_invariants(&storage);
             assert_eq!(
-                root.get(&mut storage, &primary_key(i)).unwrap(),
+                root.get(&storage, &primary_key(i)).unwrap(),
                 Some(i.to_string())
             );
         }
 
         // test deleting values
         for i in (0..1000).step_by(3) {
-            let (root, _) = root.delete(&mut storage, &primary_key(i)).unwrap();
-            root.assert_invariants(&mut storage);
-            assert_eq!(root.get(&mut storage, &primary_key(i)).unwrap(), None);
+            let (root, _) = root.delete(&storage, &primary_key(i)).unwrap();
+            root.assert_invariants(&storage);
+            assert_eq!(root.get(&storage, &primary_key(i)).unwrap(), None);
         }
     }
 }
