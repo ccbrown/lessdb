@@ -118,6 +118,10 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         }
     }
 
+    pub fn is_empty<E, L: Loader<H, S, V, Error = E>>(&self, loader: &mut L) -> Result<bool, E> {
+        self.primary_tree.is_empty(loader)
+    }
+
     pub fn is_persisted(&self) -> bool {
         self.primary_tree.is_persisted() && self.secondary_tree.is_persisted()
     }

@@ -8,14 +8,14 @@ use std::{
     sync::Mutex,
 };
 
-const PARTITION_COUNT: usize = 1 << 16;
+const PARTITION_COUNT: usize = 1 << 12;
 
 pub fn partition_number(hash: &Hash) -> usize {
-    u16::from_be_bytes(
+    (u16::from_be_bytes(
         hash.as_ref()[..2]
             .try_into()
             .expect("hashes always have at least 2 bytes"),
-    ) as _
+    ) & 0xfff) as _
 }
 
 pub struct Node {
@@ -43,7 +43,7 @@ impl Node {
                 .map(|i| {
                     Ok(Mutex::new(
                         Partition::open(data_path.as_ref().join(format!("partition-{:08}", i)))
-                            .with_context(|| format!("unable to create partition {}", i))?,
+                            .with_context(|| format!("unable to open partition {}", i))?,
                     ))
                 })
                 .collect::<Result<_>>()?,
@@ -51,12 +51,12 @@ impl Node {
     }
 
     /// Individually clears each partition. This is equivalent to deleting everything one-by-one,
-    /// but is much faster and is atomic within each partition. This is intended for development
+    /// but is faster and is atomic within each partition. This is intended for development
     /// purposes and there's probably no good reason to use it production.
     pub fn clear_partitions(&self) -> Result<()> {
         for partition in &self.partitions {
             let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
-            partition.commit(|tree| Ok(tree.clear()))?;
+            partition.commit(|tree| Ok(tree.clear()?))?;
         }
         Ok(())
     }

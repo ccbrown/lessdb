@@ -397,6 +397,13 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
         }
     }
 
+    pub fn is_empty<E, L: Loader<K, V, Error = E>>(&self, loader: &mut L) -> Result<bool, E> {
+        Ok(match self.load_node(loader)? {
+            Node::Internal { index, children } => false,
+            Node::Leaf { keys, values } => values.is_empty(),
+        })
+    }
+
     /// Gets an item from the B-tree, if it exists.
     pub fn get<E, L: Loader<K, V, Error = E>>(
         &self,

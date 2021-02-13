@@ -131,11 +131,15 @@ impl<'a> Tree<'a> {
         self.inner
     }
 
-    pub fn clear(self) -> Self {
-        Self {
-            inner: BTree2D::new(),
-            loader: self.loader,
-        }
+    pub fn clear(mut self) -> Result<Self> {
+        Ok(if self.inner.is_empty(&mut self.loader)? {
+            self
+        } else {
+            Self {
+                inner: BTree2D::new(),
+                loader: self.loader,
+            }
+        })
     }
 
     pub fn get(&mut self, key: &PrimaryKey) -> Result<Option<Value>> {
@@ -218,7 +222,7 @@ impl<'a> b_tree_2d::Loader<Hash, Sort, Value> for Loader<'a> {
 impl Partition {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut f =
-            AppendOnlyFile::open(path).with_context(|| "unable to create append-only file")?;
+            AppendOnlyFile::open(path).with_context(|| "unable to open append-only file")?;
         let tree = match f.last_entry_offset() {
             Some(offset) => {
                 (&mut f)

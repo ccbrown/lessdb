@@ -63,16 +63,16 @@ level Redis-like API.
 
 ### Partitions
 
-Each item is assigned to one of 65536 partitions based on the first two bytes
-of its hash key. Each partition is replicated to at least 3 nodes in the
-cluster. As nodes join and leave the cluster, nodes may be moved around to
-balance the load. Note that this design is subject to hot partitions in a way
-similar to DynamoDB, though the thresholds at which this happens can be made be
-much higher.
+Each item is assigned to one of 4096 partitions based on the first two bytes of
+its hash key. Each partition is replicated to at least 3 nodes in the cluster.
+As nodes join and leave the cluster, nodes may be moved around to balance the
+load. Note that this design is subject to hot partitions in a way similar to
+DynamoDB, though the thresholds at which this happens can be made be much
+higher.
 
 For example, a 1PB store with uniformly distributed hash keys will have
-partitions that are about 15GB in size. If this store uses 200 nodes, each
-will own about 1000 partitions and require about 15TB of storage. At this scale,
+partitions that are about 244GB in size. If this store uses 200 nodes, each
+will own about 61 partitions and require about 15TB of storage. At this scale,
 bringing new nodes into the cluster would take considerable time, but requests
 should remain nearly as fast as any other scale cluster.
 

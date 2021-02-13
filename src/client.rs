@@ -8,7 +8,7 @@ use super::{
 };
 use anyhow::{Context, Result};
 use futures::{FutureExt, TryFutureExt};
-use grpcio::{ChannelBuilder, Environment, ResourceQuota, Server, ServerBuilder};
+use grpcio::{ChannelBuilder, EnvBuilder, ResourceQuota, Server, ServerBuilder};
 use std::{
     convert::{TryFrom, TryInto},
     net::ToSocketAddrs,
@@ -117,7 +117,7 @@ pub struct API {
 
 impl API {
     pub fn new<A: ToSocketAddrs>(logger: slog::Logger, node: Arc<Node>, addr: A) -> Result<Self> {
-        let env = Arc::new(Environment::new(16));
+        let env = Arc::new(EnvBuilder::new().build());
 
         let service = create_service(ServiceImpl {
             node,

@@ -67,7 +67,10 @@ impl AppendOnlyFile {
     /// Reads an entry from the current position.
     pub fn read_entry(&mut self) -> Result<Vec<u8>> {
         let mut header = [0u8; ENTRY_PREFIX_LENGTH];
-        self.f.read_exact(&mut header)?;
+        self.f.read_exact(&mut header).map_err(|e| match e.kind() {
+            io::ErrorKind::UnexpectedEof => Error::Corruption,
+            _ => e.into(),
+        })?;
 
         let len = u32::from_be_bytes((&header[..4]).try_into().expect("we know this is 4 bytes"))
             as usize;
