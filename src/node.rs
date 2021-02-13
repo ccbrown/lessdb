@@ -50,6 +50,17 @@ impl Node {
         })
     }
 
+    /// Individually clears each partition. This is equivalent to deleting everything one-by-one,
+    /// but is much faster and is atomic within each partition. This is intended for development
+    /// purposes and there's probably no good reason to use it production.
+    pub fn clear_partitions(&self) -> Result<()> {
+        for partition in &self.partitions {
+            let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+            partition.commit(|tree| Ok(tree.clear()))?;
+        }
+        Ok(())
+    }
+
     pub fn get(&self, key: &Hash) -> Result<Option<Value>> {
         let partition = &self.partitions[partition_number(key)];
         let mut partition = partition.lock().expect("the lock shouldn't be poisoned");

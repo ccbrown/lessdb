@@ -131,6 +131,13 @@ impl<'a> Tree<'a> {
         self.inner
     }
 
+    pub fn clear(self) -> Self {
+        Self {
+            inner: BTree2D::new(),
+            loader: self.loader,
+        }
+    }
+
     pub fn get(&mut self, key: &PrimaryKey) -> Result<Option<Value>> {
         Ok(self.inner.get(&mut self.loader, key)?)
     }

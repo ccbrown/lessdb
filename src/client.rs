@@ -192,6 +192,28 @@ impl ServiceImpl {
 }
 
 impl Service for ServiceImpl {
+    fn clear_partitions(
+        &mut self,
+        ctx: ::grpcio::RpcContext,
+        _req: proto::ClearPartitionsRequest,
+        sink: ::grpcio::UnarySink<proto::ClearPartitionsResponse>,
+    ) {
+        self.handle_grpc_request(
+            ctx,
+            sink,
+            |node| {
+                node.clear_partitions()
+                    .map(|_| proto::ClearPartitionsResult::new())
+            },
+            |resp, r| {
+                resp.body = Some(match r {
+                    Ok(r) => proto::ClearPartitionsResponse_oneof_body::result(r),
+                    Err(e) => proto::ClearPartitionsResponse_oneof_body::error(e),
+                })
+            },
+        )
+    }
+
     fn get(
         &mut self,
         ctx: ::grpcio::RpcContext,

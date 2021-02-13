@@ -31,6 +31,17 @@ message Error {
     Code code = 1;
 }
 
+message ClearPartitionsRequest {}
+
+message ClearPartitionsResult {}
+
+message ClearPartitionsResponse {
+    oneof body {
+        Error error = 1;
+        ClearPartitionsResult result = 2;
+    }
+}
+
 message GetRequest {
     bytes key = 1;
 }
@@ -191,6 +202,7 @@ message GetMapRangeByFieldResponse {
 }
 
 service Service {
+    rpc clearPartitions(ClearPartitionsRequest) returns (ClearPartitionsResponse);
     rpc get(GetRequest) returns (GetResponse);
     rpc set(SetRequest) returns (SetResponse);
     rpc delete(DeleteRequest) returns (DeleteResponse);
