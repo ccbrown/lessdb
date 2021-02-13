@@ -227,17 +227,10 @@ impl Node {
         Ok(did_delete)
     }
 
-    /// Gets entries in a map sorted by their prescribed order.
-    pub fn get_map_range<B: RangeBounds<Scalar>>(
-        &self,
+    fn map_range_bounds<B: RangeBounds<Scalar>>(
         key: Hash,
         bounds: B,
-        limit: Option<usize>,
-        reverse: bool,
-    ) -> Result<Vec<Value>> {
-        let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
-
+    ) -> (Bound<SecondaryKey>, Bound<SecondaryKey>) {
         let start = match bounds.start_bound() {
             Bound::Unbounded => Bound::Included(SecondaryKey {
                 hash: key.clone(),
@@ -274,6 +267,22 @@ impl Node {
             }),
         };
 
+        (start, end)
+    }
+
+    /// Gets entries in a map sorted by their prescribed order.
+    pub fn map_get_range<B: RangeBounds<Scalar>>(
+        &self,
+        key: Hash,
+        bounds: B,
+        limit: Option<usize>,
+        reverse: bool,
+    ) -> Result<Vec<Value>> {
+        let partition = &self.partitions[partition_number(&key)];
+        let (start, end) = Self::map_range_bounds(key, bounds);
+
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+
         let mut tree = partition.tree();
         let range = tree.get_range_by_secondary_key((start, end));
 
@@ -285,17 +294,19 @@ impl Node {
         }
     }
 
-    /// Gets entries in a map sorted by their fields.
-    pub fn get_map_range_by_field<B: RangeBounds<Scalar>>(
-        &self,
+    /// Counts entries in a map sorted by their prescribed order.
+    pub fn map_count_range<B: RangeBounds<Scalar>>(&self, key: Hash, bounds: B) -> Result<u64> {
+        let partition = &self.partitions[partition_number(&key)];
+        let (start, end) = Self::map_range_bounds(key, bounds);
+
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        partition.tree().count_range_by_secondary_key((start, end))
+    }
+
+    fn map_range_by_field_bounds<B: RangeBounds<Scalar>>(
         key: Hash,
         bounds: B,
-        limit: Option<usize>,
-        reverse: bool,
-    ) -> Result<Vec<Value>> {
-        let partition = &self.partitions[partition_number(&key)];
-        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
-
+    ) -> (Bound<PrimaryKey>, Bound<PrimaryKey>) {
         let start = match bounds.start_bound() {
             Bound::Unbounded => Bound::Included(PrimaryKey {
                 hash: key.clone(),
@@ -326,6 +337,22 @@ impl Node {
             }),
         };
 
+        (start, end)
+    }
+
+    /// Gets entries in a map sorted by their fields.
+    pub fn map_get_range_by_field<B: RangeBounds<Scalar>>(
+        &self,
+        key: Hash,
+        bounds: B,
+        limit: Option<usize>,
+        reverse: bool,
+    ) -> Result<Vec<Value>> {
+        let partition = &self.partitions[partition_number(&key)];
+        let (start, end) = Self::map_range_by_field_bounds(key, bounds);
+
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+
         let mut tree = partition.tree();
         let range = tree.get_range_by_primary_key((start, end));
 
@@ -335,5 +362,18 @@ impl Node {
             (None, true) => range.rev().collect(),
             (None, false) => range.collect(),
         }
+    }
+
+    /// Counts entries in a map sorted by their fields.
+    pub fn map_count_range_by_field<B: RangeBounds<Scalar>>(
+        &self,
+        key: Hash,
+        bounds: B,
+    ) -> Result<u64> {
+        let partition = &self.partitions[partition_number(&key)];
+        let (start, end) = Self::map_range_by_field_bounds(key, bounds);
+
+        let mut partition = partition.lock().expect("the lock shouldn't be poisoned");
+        partition.tree().count_range_by_primary_key((start, end))
     }
 }

@@ -11,7 +11,10 @@ pub enum Tree<K: Clone, V: Clone> {
 }
 
 impl<K: Clone, V: Clone> Tree<K, V> {
-    fn load_node<E, L: Loader<K, V, Error = E>>(&self, loader: &mut L) -> Result<Node<K, V>, E> {
+    pub fn load_node<E, L: Loader<K, V, Error = E>>(
+        &self,
+        loader: &mut L,
+    ) -> Result<Node<K, V>, E> {
         match self {
             Self::Persisted { id } => loader.load_node(*id),
             Self::Volatile { node, .. } => Ok(node.clone()),
@@ -42,10 +45,25 @@ impl<V: Clone> Value<V> {
 }
 
 #[derive(Clone, Debug)]
+pub struct Child<K: Clone, V: Clone> {
+    pub len: u64,
+    pub tree: Tree<K, V>,
+}
+
+impl<K: Clone + Ord, V: Clone> Into<Child<K, V>> for Node<K, V> {
+    fn into(self) -> Child<K, V> {
+        Child {
+            len: self.len(),
+            tree: Tree::Volatile { node: self },
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Node<K: Clone, V: Clone> {
     Internal {
         index: Vec<K>,
-        children: Vec<Tree<K, V>>,
+        children: Vec<Child<K, V>>,
     },
     Leaf {
         keys: Vec<K>,
@@ -53,11 +71,18 @@ pub enum Node<K: Clone, V: Clone> {
     },
 }
 
-impl<K: Clone, V: Clone> Node<K, V> {
+impl<K: Clone + Ord, V: Clone> Node<K, V> {
     fn children(&self) -> usize {
         match self {
             Node::Internal { children, .. } => children.len(),
             Node::Leaf { keys, .. } => keys.len(),
+        }
+    }
+
+    fn len(&self) -> u64 {
+        match self {
+            Node::Internal { children, .. } => children.iter().map(|c| c.len).sum(),
+            Node::Leaf { keys, .. } => keys.len() as _,
         }
     }
 
@@ -130,6 +155,36 @@ impl<K: Clone, V: Clone> Node<K, V> {
             }
         }
     }
+
+    // Returns the first index of the child that might have items contained by a range with the given start bound.
+    fn min_child_index_for_start_bound(index: &[K], bound: Bound<&K>) -> usize {
+        match bound {
+            Bound::Unbounded => 0,
+            Bound::Included(key) => match index.binary_search(&key) {
+                Ok(i) => i + 1,
+                Err(i) => i,
+            },
+            Bound::Excluded(key) => match index.binary_search(&key) {
+                Ok(i) => i + 1,
+                Err(i) => i,
+            },
+        }
+    }
+
+    // Returns the last index of the child that might have items within the given bounds.
+    fn max_child_index_for_end_bound(index: &[K], bound: Bound<&K>) -> usize {
+        match bound {
+            Bound::Unbounded => index.len(),
+            Bound::Included(key) => match index.binary_search(&key) {
+                Ok(i) => i + 1,
+                Err(i) => i,
+            },
+            Bound::Excluded(key) => match index.binary_search(&key) {
+                Ok(i) => i,
+                Err(i) => i,
+            },
+        }
+    }
 }
 
 pub trait Loader<K: Clone, V: Clone> {
@@ -154,7 +209,7 @@ pub struct Range<'a, K: Clone, V: Clone, L, B> {
 }
 
 struct IteratorState<K: Clone, V: Clone> {
-    to_visit: Vec<VecDeque<Tree<K, V>>>,
+    to_visit: Vec<VecDeque<Child<K, V>>>,
     keys: VecDeque<K>,
     values: VecDeque<Value<V>>,
 }
@@ -184,19 +239,12 @@ impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds
                     index,
                     mut children,
                 } => {
-                    let min_child_idx = match self.bounds.start_bound() {
-                        Bound::Unbounded => 0,
-                        Bound::Included(key) => match index.binary_search(&key) {
-                            Ok(i) => i + 1,
-                            Err(i) => i,
-                        },
-                        Bound::Excluded(key) => match index.binary_search(&key) {
-                            Ok(i) => i + 1,
-                            Err(i) => i,
-                        },
-                    };
+                    let min_child_idx = Node::<_, V>::min_child_index_for_start_bound(
+                        &index,
+                        self.bounds.start_bound(),
+                    );
                     to_visit.push(children.split_off(min_child_idx + 1).into());
-                    node = children[min_child_idx].load_node(self.loader)?;
+                    node = children[min_child_idx].tree.load_node(self.loader)?;
                 }
                 Node::Leaf {
                     mut keys,
@@ -232,12 +280,12 @@ impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds
 
         if state.keys.is_empty() {
             'outer: while let Some(next) = state.to_visit.last_mut() {
-                if let Some(mut tree) = next.pop_front() {
+                if let Some(mut child) = next.pop_front() {
                     loop {
-                        match tree.load_node(self.loader)? {
+                        match child.tree.load_node(self.loader)? {
                             Node::Internal { mut children, .. } => {
                                 state.to_visit.push(children.split_off(1).into());
-                                tree = children.remove(0);
+                                child = children.remove(0);
                             }
                             Node::Leaf { keys, values } => {
                                 state.keys = keys.into();
@@ -280,19 +328,12 @@ impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds
                     index,
                     mut children,
                 } => {
-                    let max_child_idx = match self.bounds.end_bound() {
-                        Bound::Unbounded => index.len(),
-                        Bound::Included(key) => match index.binary_search(&key) {
-                            Ok(i) => i + 1,
-                            Err(i) => i,
-                        },
-                        Bound::Excluded(key) => match index.binary_search(&key) {
-                            Ok(i) => i,
-                            Err(i) => i,
-                        },
-                    };
+                    let max_child_idx = Node::<_, V>::max_child_index_for_end_bound(
+                        &index,
+                        self.bounds.end_bound(),
+                    );
                     let _ = children.split_off(max_child_idx + 1);
-                    node = children.remove(max_child_idx).load_node(self.loader)?;
+                    node = children.remove(max_child_idx).tree.load_node(self.loader)?;
                     to_visit.push(children.into());
                 }
                 Node::Leaf {
@@ -331,11 +372,11 @@ impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds
 
         if state.keys.is_empty() {
             'outer: while let Some(next) = state.to_visit.last_mut() {
-                if let Some(mut tree) = next.pop_back() {
+                if let Some(mut child) = next.pop_back() {
                     loop {
-                        match tree.load_node(self.loader)? {
+                        match child.tree.load_node(self.loader)? {
                             Node::Internal { mut children, .. } => {
-                                tree = children.remove(children.len() - 1);
+                                child = children.remove(children.len() - 1);
                                 state.to_visit.push(children.into());
                             }
                             Node::Leaf { keys, values } => {
@@ -397,10 +438,56 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
         }
     }
 
+    /// Counts items from the B-tree without loading them.
+    pub fn count<'a, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>(
+        &'a self,
+        loader: &'a mut L,
+        bounds: B,
+    ) -> Result<u64, E> {
+        Ok(match self.load_node(loader)? {
+            Node::Internal { index, children } => {
+                if let (Bound::Unbounded, Bound::Unbounded) =
+                    (bounds.start_bound(), bounds.end_bound())
+                {
+                    children.iter().map(|c| c.len).sum()
+                } else {
+                    let left =
+                        Node::<_, V>::min_child_index_for_start_bound(&index, bounds.start_bound());
+                    let right =
+                        Node::<_, V>::max_child_index_for_end_bound(&index, bounds.end_bound());
+                    if left == right {
+                        children[left].tree.count(loader, bounds)?
+                    } else {
+                        let left_count = match bounds.start_bound() {
+                            Bound::Unbounded => children[left].len,
+                            _ => children[left]
+                                .tree
+                                .count(loader, (bounds.start_bound(), Bound::Unbounded))?,
+                        };
+                        let middle_count =
+                            children[left + 1..right].iter().map(|c| c.len).sum::<u64>();
+                        let right_count = match bounds.end_bound() {
+                            Bound::Unbounded => children[right].len,
+                            _ => children[right]
+                                .tree
+                                .count(loader, (Bound::Unbounded, bounds.end_bound()))?,
+                        };
+                        left_count + middle_count + right_count
+                    }
+                }
+            }
+            Node::Leaf { keys, .. } => keys
+                .iter()
+                .skip_while(|k| !bounds.contains(k))
+                .take_while(|k| bounds.contains(k))
+                .count() as u64,
+        })
+    }
+
     pub fn is_empty<E, L: Loader<K, V, Error = E>>(&self, loader: &mut L) -> Result<bool, E> {
         Ok(match self.load_node(loader)? {
-            Node::Internal { index, children } => false,
-            Node::Leaf { keys, values } => values.is_empty(),
+            Node::Internal { .. } => false,
+            Node::Leaf { values, .. } => values.is_empty(),
         })
     }
 
@@ -412,8 +499,8 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
     ) -> Result<Option<V>, E> {
         match self.load_node(loader)? {
             Node::Internal { index, children } => match index.binary_search(&key) {
-                Ok(i) => children[i + 1].get(loader, key),
-                Err(i) => children[i].get(loader, key),
+                Ok(i) => children[i + 1].tree.get(loader, key),
+                Err(i) => children[i].tree.get(loader, key),
             },
             Node::Leaf { keys, values } => Ok(match keys.binary_search(&key) {
                 Ok(i) => Some(values[i].clone().load(loader)?),
@@ -465,7 +552,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                     (a, Some((b_key, b))) => Tree::Volatile {
                         node: Node::Internal {
                             index: vec![b_key],
-                            children: vec![Tree::Volatile { node: a }, Tree::Volatile { node: b }],
+                            children: vec![a.into(), b.into()],
                         },
                     },
                 },
@@ -493,11 +580,12 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                 let mut new_children = Vec::with_capacity(children.len() + 1);
                 new_children.extend_from_slice(&children[..i]);
                 children[i]
+                    .tree
                     .insert_impl(loader, key, value)?
                     .map(|(new_child, prev_value)| {
                         let new_index = match new_child.split_if_overflow() {
                             (a, None) => {
-                                new_children.push(Tree::Volatile { node: a });
+                                new_children.push(a.into());
                                 index
                             }
                             (a, Some((b_key, b))) => {
@@ -505,8 +593,8 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                                 new_index.extend_from_slice(&index[..i]);
                                 new_index.push(b_key);
                                 new_index.extend_from_slice(&index[i..]);
-                                new_children.push(Tree::Volatile { node: a });
-                                new_children.push(Tree::Volatile { node: b });
+                                new_children.push(a.into());
+                                new_children.push(b.into());
                                 new_index
                             }
                         };
@@ -547,7 +635,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
             Some(deletion) => (
                 match deletion.new_node {
                     Node::Internal { mut children, .. } if children.len() == 1 => {
-                        children.remove(0)
+                        children.remove(0).tree
                     }
                     _ => Tree::Volatile {
                         node: deletion.new_node,
@@ -573,13 +661,11 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                     Ok(i) => i + 1,
                     Err(i) => i,
                 };
-                match children[i].delete_impl(loader, key)? {
+                match children[i].tree.delete_impl(loader, key)? {
                     Some(deletion) => Some({
                         let mut left_key_if_changed = None;
                         if deletion.new_node.children() >= MIN_NODE_CHILDREN {
-                            children[i] = Tree::Volatile {
-                                node: deletion.new_node,
-                            };
+                            children[i] = deletion.new_node.into();
                             if i == 0 {
                                 left_key_if_changed = deletion.left_key_if_changed;
                             } else if let Some(key) = deletion.left_key_if_changed {
@@ -597,12 +683,12 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                                     deletion.new_node,
                                     i,
                                     deletion.left_key_if_changed,
-                                    children[1].load_node(loader)?,
+                                    children[1].tree.load_node(loader)?,
                                     index.remove(0),
                                 )
                             } else {
                                 (
-                                    children[i - 1].load_node(loader)?,
+                                    children[i - 1].tree.load_node(loader)?,
                                     i - 1,
                                     None,
                                     deletion.new_node,
@@ -615,11 +701,11 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                             {
                                 (a, None) => {
                                     children.remove(left_node_idx);
-                                    children[left_node_idx] = Tree::Volatile { node: a };
+                                    children[left_node_idx] = a.into();
                                 }
                                 (a, Some((b_key, b))) => {
-                                    children[left_node_idx] = Tree::Volatile { node: a };
-                                    children[left_node_idx + 1] = Tree::Volatile { node: b };
+                                    children[left_node_idx] = a.into();
+                                    children[left_node_idx + 1] = b.into();
                                     index.insert(left_node_idx, b_key);
                                 }
                             }
@@ -681,7 +767,7 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                 assert_eq!(children.len() <= MAX_NODE_CHILDREN, true);
                 assert_eq!(index.len() + 1, children.len());
                 for child in children {
-                    child.assert_invariants_impl(loader, false);
+                    child.tree.assert_invariants_impl(loader, false);
                 }
             }
             Node::Leaf { keys, values } => {
@@ -723,6 +809,10 @@ mod tests {
         // insert some arbitrary values
         for i in (100..900).step_by(10) {
             let (new_root, prev) = root.insert(&mut storage, i, i.to_string()).unwrap();
+            assert_eq!(
+                new_root.count(&mut storage, ..).unwrap(),
+                root.count(&mut storage, ..).unwrap() + 1
+            );
             root = new_root;
             assert_eq!(prev.is_none(), true);
             root.assert_invariants(&mut storage);
@@ -750,8 +840,10 @@ mod tests {
 
         // test deleting values
         for i in (0..1000).step_by(3) {
+            let len_before = root.count(&mut storage, ..).unwrap();
             let (root, prev) = root.delete(&mut storage, &i).unwrap();
             if i % 9 == 0 {
+                assert_eq!(root.count(&mut storage, ..).unwrap(), len_before - 1);
                 assert_eq!(prev.is_some(), true);
             }
             root.assert_invariants(&mut storage);
@@ -830,6 +922,31 @@ mod tests {
                     .rev()
                     .filter_map(|n| if n < 100 { Some(n.to_string()) } else { None })
                     .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_tree_count() {
+        let mut storage = Storage;
+
+        let mut root = Tree::<i32, String>::new();
+
+        // insert some arbitrary values
+        for i in 25..75 {
+            let (new_root, _) = root.insert(&mut storage, i, i.to_string()).unwrap();
+            root = new_root;
+            root.assert_invariants(&mut storage);
+        }
+
+        // check some counts
+        for i in 0..100 {
+            let expected_ge = 75 - i.max(25).min(75) as u64;
+            assert_eq!(root.count(&mut storage, i..).unwrap(), expected_ge);
+
+            assert_eq!(
+                root.count(&mut storage, i..(i + 10)).unwrap(),
+                expected_ge.min(10).min(i.max(15) as u64 - 15)
             );
         }
     }

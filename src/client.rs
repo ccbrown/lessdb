@@ -1,12 +1,12 @@
 use super::{
     node::{Node, SetCondition},
-    partition::{Scalar, Value},
+    partition::{IncorrectHashLengthError, Scalar, Value},
     protos::{
         client as proto,
         client_grpc::{create_service, Service},
     },
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use futures::{FutureExt, TryFutureExt};
 use grpcio::{ChannelBuilder, EnvBuilder, ResourceQuota, Server, ServerBuilder};
 use std::{
@@ -16,12 +16,35 @@ use std::{
     sync::Arc,
 };
 
-#[error("missing value")]
+#[derive(Debug, thiserror::Error)]
+enum UserFacingError {
+    #[error("bad request: {0}")]
+    BadRequest(String),
+    #[error("internal error")]
+    InternalError(Error),
+}
+
+trait BadRequestError: std::error::Error {}
+
+// these errors and their messages can be converted directly into bad request errors
+impl BadRequestError for ScalarError {}
+impl BadRequestError for ValueError {}
+impl BadRequestError for IncorrectHashLengthError {}
+
+impl<E: BadRequestError> From<E> for UserFacingError {
+    fn from(e: E) -> Self {
+        Self::BadRequest(e.to_string())
+    }
+}
+
 #[derive(Clone, Copy, Debug, thiserror::Error)]
-pub struct MissingValueError;
+pub enum ScalarError {
+    #[error("missing required scalar")]
+    MissingRequiredScalar,
+}
 
 impl TryFrom<proto::Scalar> for Scalar {
-    type Error = MissingValueError;
+    type Error = ScalarError;
 
     fn try_from(value: proto::Scalar) -> Result<Self, Self::Error> {
         match value.value {
@@ -29,24 +52,32 @@ impl TryFrom<proto::Scalar> for Scalar {
                 proto::Scalar_oneof_value::bytes(bytes) => Scalar::Bytes(bytes.into()),
                 proto::Scalar_oneof_value::int(n) => Scalar::Int(n),
             }),
-            None => Err(MissingValueError),
+            None => Err(ScalarError::MissingRequiredScalar),
         }
     }
 }
 
 impl TryFrom<Option<proto::Scalar>> for Scalar {
-    type Error = MissingValueError;
+    type Error = ScalarError;
 
     fn try_from(value: Option<proto::Scalar>) -> Result<Self, Self::Error> {
         match value {
             Some(value) => value.try_into(),
-            None => Err(MissingValueError),
+            None => Err(ScalarError::MissingRequiredScalar),
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+pub enum ValueError {
+    #[error(transparent)]
+    ScalarError(#[from] ScalarError),
+    #[error("missing required value")]
+    MissingRequiredValue,
+}
+
 impl TryFrom<proto::Value> for Value {
-    type Error = MissingValueError;
+    type Error = ValueError;
 
     fn try_from(value: proto::Value) -> Result<Self, Self::Error> {
         match value.value {
@@ -60,18 +91,18 @@ impl TryFrom<proto::Value> for Value {
                         .collect::<Result<_, _>>()?,
                 ),
             }),
-            None => Err(MissingValueError),
+            None => Err(ValueError::MissingRequiredValue),
         }
     }
 }
 
 impl TryFrom<Option<proto::Value>> for Value {
-    type Error = MissingValueError;
+    type Error = ValueError;
 
     fn try_from(value: Option<proto::Value>) -> Result<Self, Self::Error> {
         match value {
             Some(value) => value.try_into(),
-            None => Err(MissingValueError),
+            None => Err(ValueError::MissingRequiredValue),
         }
     }
 }
@@ -103,7 +134,7 @@ impl Into<proto::Value> for Value {
     }
 }
 
-fn convert_bound(bound: Option<proto::Bound>) -> Result<Bound<Scalar>, MissingValueError> {
+fn convert_bound(bound: Option<proto::Bound>) -> Result<Bound<Scalar>, ValueError> {
     Ok(match bound.and_then(|bound| bound.value) {
         None => Bound::Unbounded,
         Some(proto::Bound_oneof_value::included(scalar)) => Bound::Included(scalar.try_into()?),
@@ -160,7 +191,7 @@ impl ServiceImpl {
     fn handle_grpc_request<
         Response: Default,
         Output,
-        F: FnOnce(&Node) -> Result<Output>,
+        F: FnOnce(&Node) -> Result<Output, UserFacingError>,
         SetBody: FnOnce(&mut Response, Result<Output, proto::Error>),
     >(
         &mut self,
@@ -176,9 +207,17 @@ impl ServiceImpl {
         set_body(
             &mut resp,
             f(&self.node).map_err(|e| {
-                error!(self.logger, "request error: {}", e);
                 let mut err = proto::Error::new();
-                err.set_code(proto::Error_Code::INTERNAL);
+                err.message = e.to_string();
+                match e {
+                    UserFacingError::BadRequest(_) => {
+                        err.set_code(proto::Error_Code::BAD_REQUEST);
+                    }
+                    UserFacingError::InternalError(e) => {
+                        error!(self.logger, "request error: {}", e);
+                        err.set_code(proto::Error_Code::INTERNAL);
+                    }
+                }
                 err
             }),
         );
@@ -204,6 +243,7 @@ impl Service for ServiceImpl {
             |node| {
                 node.clear_partitions()
                     .map(|_| proto::ClearPartitionsResult::new())
+                    .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
@@ -225,13 +265,15 @@ impl Service for ServiceImpl {
             sink,
             |node| {
                 let key = req.key.try_into()?;
-                node.get(&key).map(|value| {
-                    let mut result = proto::GetResult::new();
-                    if let Some(value) = value {
-                        result.set_value(value.into());
-                    }
-                    result
-                })
+                node.get(&key)
+                    .map(|value| {
+                        let mut result = proto::GetResult::new();
+                        if let Some(value) = value {
+                            result.set_value(value.into());
+                        }
+                        result
+                    })
+                    .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
@@ -258,7 +300,7 @@ impl Service for ServiceImpl {
                     .condition
                     .take()
                     .and_then(|cond| cond.value)
-                    .map(|cond| -> Result<_> {
+                    .map(|cond| -> Result<_, ValueError> {
                         Ok(match cond {
                             proto::SetRequest_Condition_oneof_value::exists(exists) => {
                                 SetCondition::Exists(exists)
@@ -269,11 +311,13 @@ impl Service for ServiceImpl {
                         })
                     })
                     .transpose()?;
-                node.set(key, value, condition).map(|did_set| {
-                    let mut result = proto::SetResult::new();
-                    result.set_did_set(did_set);
-                    result
-                })
+                node.set(key, value, condition)
+                    .map(|did_set| {
+                        let mut result = proto::SetResult::new();
+                        result.set_did_set(did_set);
+                        result
+                    })
+                    .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
@@ -295,11 +339,13 @@ impl Service for ServiceImpl {
             sink,
             |node| {
                 let key = req.key.try_into()?;
-                node.delete(&key).map(|did_delete| {
-                    let mut result = proto::DeleteResult::new();
-                    result.set_did_delete(did_delete);
-                    result
-                })
+                node.delete(&key)
+                    .map(|did_delete| {
+                        let mut result = proto::DeleteResult::new();
+                        result.set_did_delete(did_delete);
+                        result
+                    })
+                    .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
@@ -328,6 +374,7 @@ impl Service for ServiceImpl {
                     .collect::<Result<_, _>>()?;
                 node.set_add(key, members)
                     .map(|_| proto::SetAddResult::new())
+                    .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
@@ -356,6 +403,7 @@ impl Service for ServiceImpl {
                     .collect::<Result<_, _>>()?;
                 node.set_remove(key, members)
                     .map(|_| proto::SetRemoveResult::new())
+                    .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
@@ -382,6 +430,7 @@ impl Service for ServiceImpl {
                 let order = req.order.take().try_into()?;
                 node.map_set(key, field, value, order)
                     .map(|_| proto::MapSetResult::new())
+                    .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
@@ -404,11 +453,13 @@ impl Service for ServiceImpl {
             |node| {
                 let key = req.key.try_into()?;
                 let field = req.field.take().try_into()?;
-                node.map_delete(key, field).map(|did_delete| {
-                    let mut result = proto::MapDeleteResult::new();
-                    result.set_did_delete(did_delete);
-                    result
-                })
+                node.map_delete(key, field)
+                    .map(|did_delete| {
+                        let mut result = proto::MapDeleteResult::new();
+                        result.set_did_delete(did_delete);
+                        result
+                    })
+                    .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
@@ -419,11 +470,11 @@ impl Service for ServiceImpl {
         )
     }
 
-    fn get_map_range(
+    fn map_get_range(
         &mut self,
         ctx: ::grpcio::RpcContext,
-        mut req: proto::GetMapRangeRequest,
-        sink: ::grpcio::UnarySink<proto::GetMapRangeResponse>,
+        mut req: proto::MapGetRangeRequest,
+        sink: ::grpcio::UnarySink<proto::MapGetRangeResponse>,
     ) {
         self.handle_grpc_request(
             ctx,
@@ -432,7 +483,7 @@ impl Service for ServiceImpl {
                 let key = req.key.try_into()?;
                 let start: Bound<Scalar> = convert_bound(req.start.take())?;
                 let end: Bound<Scalar> = convert_bound(req.end.take())?;
-                node.get_map_range(
+                node.map_get_range(
                     key,
                     (start, end),
                     if req.limit > 0 {
@@ -443,25 +494,26 @@ impl Service for ServiceImpl {
                     req.reverse,
                 )
                 .map(|values| {
-                    let mut result = proto::GetMapRangeResult::new();
+                    let mut result = proto::MapGetRangeResult::new();
                     result.set_values(values.into_iter().map(|v| v.into()).collect());
                     result
                 })
+                .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
-                    Ok(r) => proto::GetMapRangeResponse_oneof_body::result(r),
-                    Err(e) => proto::GetMapRangeResponse_oneof_body::error(e),
+                    Ok(r) => proto::MapGetRangeResponse_oneof_body::result(r),
+                    Err(e) => proto::MapGetRangeResponse_oneof_body::error(e),
                 })
             },
         )
     }
 
-    fn get_map_range_by_field(
+    fn map_get_range_by_field(
         &mut self,
         ctx: ::grpcio::RpcContext,
-        mut req: proto::GetMapRangeByFieldRequest,
-        sink: ::grpcio::UnarySink<proto::GetMapRangeByFieldResponse>,
+        mut req: proto::MapGetRangeByFieldRequest,
+        sink: ::grpcio::UnarySink<proto::MapGetRangeByFieldResponse>,
     ) {
         self.handle_grpc_request(
             ctx,
@@ -470,7 +522,7 @@ impl Service for ServiceImpl {
                 let key = req.key.try_into()?;
                 let start: Bound<Scalar> = convert_bound(req.start.take())?;
                 let end: Bound<Scalar> = convert_bound(req.end.take())?;
-                node.get_map_range_by_field(
+                node.map_get_range_by_field(
                     key,
                     (start, end),
                     if req.limit > 0 {
@@ -481,15 +533,76 @@ impl Service for ServiceImpl {
                     req.reverse,
                 )
                 .map(|values| {
-                    let mut result = proto::GetMapRangeByFieldResult::new();
+                    let mut result = proto::MapGetRangeByFieldResult::new();
                     result.set_values(values.into_iter().map(|v| v.into()).collect());
                     result
                 })
+                .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
-                    Ok(r) => proto::GetMapRangeByFieldResponse_oneof_body::result(r),
-                    Err(e) => proto::GetMapRangeByFieldResponse_oneof_body::error(e),
+                    Ok(r) => proto::MapGetRangeByFieldResponse_oneof_body::result(r),
+                    Err(e) => proto::MapGetRangeByFieldResponse_oneof_body::error(e),
+                })
+            },
+        )
+    }
+
+    fn map_count_range(
+        &mut self,
+        ctx: ::grpcio::RpcContext,
+        mut req: proto::MapCountRangeRequest,
+        sink: ::grpcio::UnarySink<proto::MapCountRangeResponse>,
+    ) {
+        self.handle_grpc_request(
+            ctx,
+            sink,
+            |node| {
+                let key = req.key.try_into()?;
+                let start: Bound<Scalar> = convert_bound(req.start.take())?;
+                let end: Bound<Scalar> = convert_bound(req.end.take())?;
+                node.map_count_range(key, (start, end))
+                    .map(|count| {
+                        let mut result = proto::MapCountRangeResult::new();
+                        result.count = count;
+                        result
+                    })
+                    .map_err(UserFacingError::InternalError)
+            },
+            |resp, r| {
+                resp.body = Some(match r {
+                    Ok(r) => proto::MapCountRangeResponse_oneof_body::result(r),
+                    Err(e) => proto::MapCountRangeResponse_oneof_body::error(e),
+                })
+            },
+        )
+    }
+
+    fn map_count_range_by_field(
+        &mut self,
+        ctx: ::grpcio::RpcContext,
+        mut req: proto::MapCountRangeByFieldRequest,
+        sink: ::grpcio::UnarySink<proto::MapCountRangeByFieldResponse>,
+    ) {
+        self.handle_grpc_request(
+            ctx,
+            sink,
+            |node| {
+                let key = req.key.try_into()?;
+                let start: Bound<Scalar> = convert_bound(req.start.take())?;
+                let end: Bound<Scalar> = convert_bound(req.end.take())?;
+                node.map_count_range_by_field(key, (start, end))
+                    .map(|count| {
+                        let mut result = proto::MapCountRangeByFieldResult::new();
+                        result.count = count;
+                        result
+                    })
+                    .map_err(UserFacingError::InternalError)
+            },
+            |resp, r| {
+                resp.body = Some(match r {
+                    Ok(r) => proto::MapCountRangeByFieldResponse_oneof_body::result(r),
+                    Err(e) => proto::MapCountRangeByFieldResponse_oneof_body::error(e),
                 })
             },
         )

@@ -20,14 +20,14 @@ pub struct Hash(Bytes);
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("incorrect hash length")]
-pub struct IncorrectHashLength;
+pub struct IncorrectHashLengthError;
 
 impl TryFrom<Bytes> for Hash {
-    type Error = IncorrectHashLength;
+    type Error = IncorrectHashLengthError;
 
     fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
         if bytes.len() != HASH_LENGTH {
-            Err(IncorrectHashLength)
+            Err(IncorrectHashLengthError)
         } else {
             Ok(Self(bytes))
         }
@@ -83,6 +83,13 @@ impl Into<Sort> for Scalar {
     }
 }
 
+#[cfg(test)]
+impl From<&str> for Sort {
+    fn from(s: &str) -> Sort {
+        Sort::Scalar(s.into())
+    }
+}
+
 type BTree2D = b_tree_2d::Tree<Hash, Sort, Value>;
 
 pub type Key = b_tree_2d::Key<Hash, Sort>;
@@ -95,8 +102,14 @@ pub struct Partition {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct Child {
+    len: u64,
+    offset: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum Node<K: Clone + Serialize> {
-    Internal { index: Vec<K>, children: Vec<u64> },
+    Internal { index: Vec<K>, children: Vec<Child> },
     Leaf { keys: Vec<K>, values: Vec<u64> },
 }
 
@@ -107,7 +120,10 @@ impl<K: Clone + Serialize, V: Clone> Into<b_tree::Node<K, V>> for Node<K> {
                 index,
                 children: children
                     .into_iter()
-                    .map(|id| b_tree::Tree::Persisted { id })
+                    .map(|child| b_tree::Child {
+                        len: child.len,
+                        tree: b_tree::Tree::Persisted { id: child.offset },
+                    })
                     .collect(),
             },
             Self::Leaf { keys, values } => b_tree::Node::Leaf {
@@ -154,12 +170,28 @@ impl<'a> Tree<'a> {
             .get_range_by_primary_key(&mut self.loader, bounds)
     }
 
+    pub fn count_range_by_primary_key<B: RangeBounds<PrimaryKey>>(
+        &mut self,
+        bounds: B,
+    ) -> Result<u64> {
+        self.inner
+            .count_range_by_primary_key(&mut self.loader, bounds)
+    }
+
     pub fn get_range_by_secondary_key<B: RangeBounds<SecondaryKey>>(
         &mut self,
         bounds: B,
     ) -> Range<'a, SecondaryKey, Sort, Value, Loader, B> {
         self.inner
             .get_range_by_secondary_key(&mut self.loader, bounds)
+    }
+
+    pub fn count_range_by_secondary_key<B: RangeBounds<SecondaryKey>>(
+        &mut self,
+        bounds: B,
+    ) -> Result<u64> {
+        self.inner
+            .count_range_by_secondary_key(&mut self.loader, bounds)
     }
 
     pub fn insert<F: FnOnce(Option<&Value>) -> Option<Value>>(
@@ -281,7 +313,12 @@ impl Partition {
                     b_tree::Node::Internal { index, children } => {
                         let children = children
                             .into_iter()
-                            .map(|tree| Self::serialize_b_tree(tree, dest_offset, dest))
+                            .map(|child| {
+                                Ok(Child {
+                                    len: child.len,
+                                    offset: Self::serialize_b_tree(child.tree, dest_offset, dest)?,
+                                })
+                            })
                             .collect::<Result<Vec<_>>>()?;
                         Node::Internal { index, children }
                     }

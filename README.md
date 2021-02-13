@@ -84,6 +84,5 @@ second dimension.
 
 ### Client API
 
-The client API is a simple MessagePack TCP API: Clients open a connection, send
-a request, then get a response. A single connection can be used for multiple
-requests, but requests will be served sequentially.
+Clients interact with the database via gRPC. See the protos directory for the
+proto definitions.

@@ -26,9 +26,11 @@ message ScalarArray {
 message Error {
     enum Code {
         INTERNAL = 0;
+        BAD_REQUEST = 1;
     }
 
     Code code = 1;
+    string message = 2;
 }
 
 message ClearPartitionsRequest {}
@@ -163,41 +165,75 @@ message Bound {
     }
 }
 
-message GetMapRangeRequest {
+message MapGetRangeRequest {
     bytes key = 1;
     Bound start = 2;
     Bound end = 3;
     bool reverse = 4;
-    uint32 limit = 5;
+    uint64 limit = 5;
 }
 
-message GetMapRangeResult {
+message MapGetRangeResult {
     repeated Value values = 1;
 }
 
-message GetMapRangeResponse {
+message MapGetRangeResponse {
     oneof body {
         Error error = 1;
-        GetMapRangeResult result = 2;
+        MapGetRangeResult result = 2;
     }
 }
 
-message GetMapRangeByFieldRequest {
+message MapGetRangeByFieldRequest {
     bytes key = 1;
     Bound start = 2;
     Bound end = 3;
     bool reverse = 4;
-    uint32 limit = 5;
+    uint64 limit = 5;
 }
 
-message GetMapRangeByFieldResult {
+message MapGetRangeByFieldResult {
     repeated Value values = 1;
 }
 
-message GetMapRangeByFieldResponse {
+message MapGetRangeByFieldResponse {
     oneof body {
         Error error = 1;
-        GetMapRangeByFieldResult result = 2;
+        MapGetRangeByFieldResult result = 2;
+    }
+}
+
+message MapCountRangeRequest {
+    bytes key = 1;
+    Bound start = 2;
+    Bound end = 3;
+}
+
+message MapCountRangeResult {
+    uint64 count = 1;
+}
+
+message MapCountRangeResponse {
+    oneof body {
+        Error error = 1;
+        MapCountRangeResult result = 2;
+    }
+}
+
+message MapCountRangeByFieldRequest {
+    bytes key = 1;
+    Bound start = 2;
+    Bound end = 3;
+}
+
+message MapCountRangeByFieldResult {
+    uint64 count = 1;
+}
+
+message MapCountRangeByFieldResponse {
+    oneof body {
+        Error error = 1;
+        MapCountRangeByFieldResult result = 2;
     }
 }
 
@@ -210,6 +246,8 @@ service Service {
     rpc set_remove(SetRemoveRequest) returns (SetRemoveResponse);
     rpc map_set(MapSetRequest) returns (MapSetResponse);
     rpc map_delete(MapDeleteRequest) returns (MapDeleteResponse);
-    rpc get_map_range(GetMapRangeRequest) returns (GetMapRangeResponse);
-    rpc get_map_range_by_field(GetMapRangeByFieldRequest) returns (GetMapRangeByFieldResponse);
+    rpc map_get_range(MapGetRangeRequest) returns (MapGetRangeResponse);
+    rpc map_get_range_by_field(MapGetRangeByFieldRequest) returns (MapGetRangeByFieldResponse);
+    rpc map_count_range(MapCountRangeRequest) returns (MapCountRangeResponse);
+    rpc map_count_range_by_field(MapCountRangeByFieldRequest) returns (MapCountRangeByFieldResponse);
 }

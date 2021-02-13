@@ -149,6 +149,20 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         Range(self.primary_tree.get_range(loader, bounds))
     }
 
+    /// Counts a range of items based on their primary key.
+    pub fn count_range_by_primary_key<
+        'a,
+        E,
+        L: Loader<H, S, V, Error = E>,
+        B: RangeBounds<PrimaryKey<H, S>>,
+    >(
+        &'a self,
+        loader: &'a mut L,
+        bounds: B,
+    ) -> Result<u64, E> {
+        self.primary_tree.count(loader, bounds)
+    }
+
     /// Gets a range of items based on their secondary key.
     pub fn get_range_by_secondary_key<
         'a,
@@ -161,6 +175,20 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         bounds: B,
     ) -> Range<'a, SecondaryKey<H, S>, S, V, L, B> {
         Range(self.secondary_tree.get_range(loader, bounds))
+    }
+
+    /// Counts a range of items based on their secondary key.
+    pub fn count_range_by_secondary_key<
+        'a,
+        E,
+        L: Loader<H, S, V, Error = E>,
+        B: RangeBounds<SecondaryKey<H, S>>,
+    >(
+        &'a self,
+        loader: &'a mut L,
+        bounds: B,
+    ) -> Result<u64, E> {
+        self.secondary_tree.count(loader, bounds)
     }
 
     /// Inserts a new item into the B-tree or updates an existing one.
