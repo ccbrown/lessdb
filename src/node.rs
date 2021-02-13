@@ -1,11 +1,14 @@
-use super::partition::{Hash, Key, Partition, PrimaryKey, Scalar, SecondaryKey, Sort, Value};
+use super::{
+    cache::Cache,
+    partition::{Hash, Key, Partition, PrimaryKey, Scalar, SecondaryKey, Sort, Value},
+};
 use anyhow::{Context, Result};
 use std::{
     collections::HashSet,
     convert::TryInto,
     ops::{Bound, RangeBounds},
     path::Path,
-    sync::RwLock,
+    sync::{Arc, RwLock},
 };
 
 const PARTITION_COUNT: usize = 1 << 12;
@@ -38,12 +41,17 @@ impl SetCondition {
 
 impl Node {
     pub fn new<P: AsRef<Path>>(data_path: P) -> Result<Self> {
+        let cache = Arc::new(Cache::new());
         Ok(Self {
             partitions: (0..PARTITION_COUNT)
                 .map(|i| {
                     Ok(RwLock::new(
-                        Partition::open(data_path.as_ref().join(format!("partition-{:08}", i)))
-                            .with_context(|| format!("unable to open partition {}", i))?,
+                        Partition::open(
+                            data_path.as_ref().join(format!("partition-{:08}", i)),
+                            i as _,
+                            cache.clone(),
+                        )
+                        .with_context(|| format!("unable to open partition {}", i))?,
                     ))
                 })
                 .collect::<Result<_>>()?,
@@ -375,5 +383,58 @@ impl Node {
 
         let partition = partition.read().expect("the lock shouldn't be poisoned");
         partition.tree().count_range_by_primary_key((start, end))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempdir::TempDir;
+
+    struct Test {
+        node: Node,
+        _dir: TempDir,
+    }
+
+    impl Test {
+        pub fn new() -> Self {
+            let dir = TempDir::new("partition-test").unwrap();
+            Self {
+                node: Node::new(dir.path()).unwrap(),
+                _dir: dir,
+            }
+        }
+    }
+
+    #[test]
+    fn test_node() {
+        let t = Test::new();
+
+        assert_eq!(t.node.get(&"foo".into()).unwrap(), None);
+        assert_eq!(t.node.map_count_range("foo".into(), ..).unwrap(), 0);
+    }
+
+    #[cfg(feature = "benchmarks")]
+    #[bench]
+    fn bench_map_set(b: &mut test::Bencher) {
+        use bytes::BytesMut;
+
+        let t = Test::new();
+
+        let mut hash = BytesMut::new();
+        hash.resize(32, 0x00);
+        let hash: Hash = hash.freeze().try_into().unwrap();
+
+        let mut value = BytesMut::new();
+        value.resize(1000, 0x20);
+        let value: Value = value.freeze().into();
+
+        let mut i = 0;
+        b.iter(|| {
+            t.node
+                .map_set(hash.clone(), Scalar::Int(i), value.clone(), Scalar::Int(0))
+                .unwrap();
+            i += 1;
+        });
     }
 }

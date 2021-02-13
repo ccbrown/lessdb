@@ -49,8 +49,7 @@ DynamoDBTable:
 ```
 
 The hash key is an actual 32-byte hash. It is computed by clients, so the
-server is agnostic to the hashing mechanism itself, but SHA-256 is a reasonable
-choice.
+server is agnostic to the hashing mechanism itself.
 
 Items can contain one of the following values:
 
@@ -86,3 +85,11 @@ second dimension.
 
 Clients interact with the database via gRPC. See the protos directory for the
 proto definitions.
+
+## Development
+
+This a Rust program. Once you have the prerequisites installed you can...
+
+* `cargo run` to run it.
+* `cargo test` to run tests.
+* `cargo +nightly bench --features benchmarks` to run benchmarks.

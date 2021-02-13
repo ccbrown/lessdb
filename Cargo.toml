@@ -4,6 +4,10 @@ version = "0.1.0"
 authors = ["Christopher Brown <ccbrown112@gmail.com>"]
 edition = "2018"
 
+[features]
+default = []
+benchmarks = []
+
 [build-dependencies]
 protoc-grpcio = "3.0.0"
 
@@ -24,6 +28,7 @@ protobuf = { version = "2.22.0", features = ["with-bytes"] }
 bytes = { version = "1.0.1", features = ["serde"] }
 grpcio = { version = "0.7.1", default-features = false, features = ["protobuf-codec"] }
 futures = "0.3.12"
+cached = "0.23.0"
 
 [dev-dependencies]
 tempdir = "0.3.7"

@@ -2,11 +2,13 @@ use super::{
     append_only_file::{self, AppendOnlyFile},
     b_tree::{self, Tree as BTree},
     b_tree_2d::{self, Range},
+    cache::{self, Cache},
 };
 use anyhow::{Context, Error, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     convert::{TryFrom, TryInto},
     io::{Read, Seek, SeekFrom},
     ops::RangeBounds,
@@ -57,6 +59,12 @@ pub enum Scalar {
     Int(i64),
 }
 
+impl From<Bytes> for Scalar {
+    fn from(b: Bytes) -> Self {
+        Self::Bytes(b)
+    }
+}
+
 #[cfg(test)]
 impl From<&str> for Scalar {
     fn from(s: &str) -> Scalar {
@@ -64,11 +72,26 @@ impl From<&str> for Scalar {
     }
 }
 
-#[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     Bytes(Bytes),
     Int(i64),
     Set(Vec<Scalar>),
+}
+
+impl From<Bytes> for Value {
+    fn from(b: Bytes) -> Self {
+        Self::Bytes(b)
+    }
+}
+
+impl From<Scalar> for Value {
+    fn from(s: Scalar) -> Self {
+        match s {
+            Scalar::Bytes(b) => Self::Bytes(b),
+            Scalar::Int(n) => Self::Int(n),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Ord, Hash, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +115,7 @@ impl From<&str> for Sort {
 }
 
 type BTree2D = b_tree_2d::Tree<Hash, Sort, Value>;
+type BTree2DValue = b_tree_2d::Value<Sort, Value>;
 
 pub type Key = b_tree_2d::Key<Hash, Sort>;
 pub type PrimaryKey = b_tree_2d::PrimaryKey<Hash, Sort>;
@@ -100,16 +124,17 @@ pub type SecondaryKey = b_tree_2d::SecondaryKey<Hash, Sort>;
 pub struct Partition {
     f: Arc<Mutex<AppendOnlyFile>>,
     tree: BTree2D,
+    loader: Loader,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Child {
+pub struct Child {
     len: u64,
     offset: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-enum Node<K: Clone + Serialize> {
+pub enum Node<K: Clone + Serialize> {
     Internal { index: Vec<K>, children: Vec<Child> },
     Leaf { keys: Vec<K>, values: Vec<u64> },
 }
@@ -208,7 +233,12 @@ impl Tree {
     }
 }
 
-pub struct Loader(Arc<Mutex<AppendOnlyFile>>);
+#[derive(Clone)]
+pub struct Loader {
+    f: Arc<Mutex<AppendOnlyFile>>,
+    partition: u32,
+    cache: Arc<Cache>,
+}
 
 impl<'a> b_tree_2d::Loader<Hash, Sort, Value> for Loader {
     type Error = Error;
@@ -217,37 +247,74 @@ impl<'a> b_tree_2d::Loader<Hash, Sort, Value> for Loader {
         &self,
         id: u64,
     ) -> Result<b_tree_2d::PrimaryNode<Hash, Sort, Value>, Self::Error> {
-        let mut f = self.0.lock().expect("the lock should not be poisoned");
-        f.seek(SeekFrom::Start(id))
-            .with_context(|| "unable to seek to primary node")?;
-        let node: Node<_> = rmp_serde::from_read(&mut *f)
-            .with_context(|| format!("unable to deserialize primary node at offset {}", id))?;
-        Ok(node.into())
+        self.cache.get_primary_node(
+            cache::Key {
+                partition: self.partition,
+                offset: id,
+            },
+            || {
+                let mut f = self.f.lock().expect("the lock should not be poisoned");
+                f.seek(SeekFrom::Start(id))
+                    .with_context(|| "unable to seek to primary node")?;
+                let node: Node<_> = rmp_serde::from_read(&mut *f).with_context(|| {
+                    format!("unable to deserialize primary node at offset {}", id)
+                })?;
+                Ok(node.into())
+            },
+        )
     }
 
     fn load_secondary_node(
         &self,
         id: u64,
     ) -> Result<b_tree_2d::SecondaryNode<Hash, Sort, Value>, Self::Error> {
-        let mut f = self.0.lock().expect("the lock should not be poisoned");
-        f.seek(SeekFrom::Start(id))
-            .with_context(|| "unable to seek to secondary node")?;
-        let node: Node<_> = rmp_serde::from_read(&mut *f)
-            .with_context(|| format!("unable to deserialize secondary node at offset {}", id))?;
-        Ok(node.into())
+        self.cache.get_secondary_node(
+            cache::Key {
+                partition: self.partition,
+                offset: id,
+            },
+            || {
+                let mut f = self.f.lock().expect("the lock should not be poisoned");
+                f.seek(SeekFrom::Start(id))
+                    .with_context(|| "unable to seek to secondary node")?;
+                let node: Node<_> = rmp_serde::from_read(&mut *f).with_context(|| {
+                    format!("unable to deserialize secondary node at offset {}", id)
+                })?;
+                Ok(node.into())
+            },
+        )
     }
 
-    fn load_value(&self, id: u64) -> Result<b_tree_2d::Value<Sort, Value>, Self::Error> {
-        let mut f = self.0.lock().expect("the lock should not be poisoned");
-        f.seek(SeekFrom::Start(id))
-            .with_context(|| "unable to seek to value")?;
-        Ok(rmp_serde::from_read(&mut *f)
-            .with_context(|| format!("unable to deserialize value at offset {}", id))?)
+    fn load_value(&self, id: u64) -> Result<BTree2DValue, Self::Error> {
+        self.cache.get_value(
+            cache::Key {
+                partition: self.partition,
+                offset: id,
+            },
+            || {
+                let mut f = self.f.lock().expect("the lock should not be poisoned");
+                f.seek(SeekFrom::Start(id))
+                    .with_context(|| "unable to seek to value")?;
+                Ok(rmp_serde::from_read(&mut *f)
+                    .with_context(|| format!("unable to deserialize value at offset {}", id))?)
+            },
+        )
     }
 }
 
+struct SerializedTree {
+    tree: BTree2D,
+    data: Vec<u8>,
+    cache_items: Vec<(u64, cache::Item)>,
+}
+
+enum SerializedNodeOrValue<K: Clone> {
+    Node(u64, b_tree::Node<K, BTree2DValue>),
+    Value(u64, BTree2DValue),
+}
+
 impl Partition {
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(path: P, number: u32, cache: Arc<Cache>) -> Result<Self> {
         let mut f =
             AppendOnlyFile::open(path).with_context(|| "unable to open append-only file")?;
         let tree = match f.last_entry_offset() {
@@ -261,8 +328,14 @@ impl Partition {
             }
             None => BTree2D::new(),
         };
+        let f = Arc::new(Mutex::new(f));
         Ok(Self {
-            f: Arc::new(Mutex::new(f)),
+            loader: Loader {
+                f: f.clone(),
+                partition: number,
+                cache,
+            },
+            f,
             tree,
         })
     }
@@ -281,40 +354,77 @@ impl Partition {
         })
     }
 
-    fn serialize_tree(tree: BTree2D, offset: u64) -> Result<(BTree2D, Vec<u8>)> {
-        // TODO: currently values may be serialized into both trees. we should deduplicate that.
+    fn serialize_tree(tree: BTree2D, offset: u64) -> Result<SerializedTree> {
         let mut buf = vec![0; 16];
-        let primary_offset = Self::serialize_b_tree(tree.primary_tree, offset, &mut buf)?;
+        let mut value_ids = HashMap::new();
+        let mut primary_cache_items = Vec::new();
+        let primary_offset = Self::serialize_b_tree(
+            tree.primary_tree,
+            offset,
+            &mut buf,
+            &mut value_ids,
+            &mut primary_cache_items,
+        )?;
         buf[..8].copy_from_slice(&primary_offset.to_be_bytes());
-        let secondary_offset = Self::serialize_b_tree(tree.secondary_tree, offset, &mut buf)?;
+        let mut secondary_cache_items = Vec::new();
+        let secondary_offset = Self::serialize_b_tree(
+            tree.secondary_tree,
+            offset,
+            &mut buf,
+            &mut value_ids,
+            &mut secondary_cache_items,
+        )?;
         buf[8..16].copy_from_slice(&secondary_offset.to_be_bytes());
-        Ok((
-            BTree2D {
+        Ok(SerializedTree {
+            tree: BTree2D {
                 primary_tree: BTree::Persisted { id: primary_offset },
                 secondary_tree: BTree::Persisted {
                     id: secondary_offset,
                 },
             },
-            buf,
-        ))
+            data: buf,
+            cache_items: primary_cache_items
+                .into_iter()
+                .map(|item| match item {
+                    SerializedNodeOrValue::Node(offset, node) => {
+                        (offset, cache::Item::PrimaryNode(node))
+                    }
+                    SerializedNodeOrValue::Value(offset, v) => (offset, cache::Item::Value(v)),
+                })
+                .chain(secondary_cache_items.into_iter().map(|item| match item {
+                    SerializedNodeOrValue::Node(offset, node) => {
+                        (offset, cache::Item::SecondaryNode(node))
+                    }
+                    SerializedNodeOrValue::Value(offset, v) => (offset, cache::Item::Value(v)),
+                }))
+                .collect(),
+        })
     }
 
-    fn serialize_b_tree<K: Clone + Serialize, V: Clone + Serialize>(
-        tree: BTree<K, V>,
+    fn serialize_b_tree<K: Clone + Serialize>(
+        tree: BTree<K, BTree2DValue>,
         dest_offset: u64,
         dest: &mut Vec<u8>,
+        mut value_ids: &mut HashMap<BTree2DValue, u64>,
+        mut cache_items: &mut Vec<SerializedNodeOrValue<K>>,
     ) -> Result<u64> {
         Ok(match tree {
             BTree::Persisted { id } => id,
             BTree::Volatile { node } => {
-                let node = match node {
+                let node_out = match node.clone() {
                     b_tree::Node::Internal { index, children } => {
                         let children = children
                             .into_iter()
                             .map(|child| {
                                 Ok(Child {
                                     len: child.len,
-                                    offset: Self::serialize_b_tree(child.tree, dest_offset, dest)?,
+                                    offset: Self::serialize_b_tree(
+                                        child.tree,
+                                        dest_offset,
+                                        dest,
+                                        &mut value_ids,
+                                        cache_items,
+                                    )?,
                                 })
                             })
                             .collect::<Result<Vec<_>>>()?;
@@ -323,37 +433,53 @@ impl Partition {
                     b_tree::Node::Leaf { keys, values } => {
                         let values = values
                             .into_iter()
-                            .map(|value| Self::serialize_b_tree_value(value, dest_offset, dest))
+                            .map(|value| {
+                                Self::serialize_b_tree_value(
+                                    value,
+                                    dest_offset,
+                                    dest,
+                                    &mut value_ids,
+                                    &mut cache_items,
+                                )
+                            })
                             .collect::<Result<Vec<_>>>()?;
                         Node::Leaf { keys, values }
                     }
                 };
                 let id = dest_offset + dest.len() as u64;
-                node.serialize(&mut rmp_serde::Serializer::new(dest))?;
+                cache_items.push(SerializedNodeOrValue::Node(id, node));
+                node_out.serialize(&mut rmp_serde::Serializer::new(dest))?;
                 id
             }
         })
     }
 
-    fn serialize_b_tree_value<V: Clone + Serialize>(
-        value: b_tree::Value<V>,
+    fn serialize_b_tree_value<K: Clone>(
+        value: b_tree::Value<BTree2DValue>,
         dest_offset: u64,
         dest: &mut Vec<u8>,
+        value_ids: &mut HashMap<BTree2DValue, u64>,
+        cache_items: &mut Vec<SerializedNodeOrValue<K>>,
     ) -> Result<u64> {
         Ok(match value {
             b_tree::Value::Persisted { id } => id,
-            b_tree::Value::Volatile { value } => {
-                let id = dest_offset + dest.len() as u64;
-                value.serialize(&mut rmp_serde::Serializer::new(dest))?;
-                id
-            }
+            b_tree::Value::Volatile { value } => match value_ids.get(&value) {
+                Some(id) => *id,
+                None => {
+                    let id = dest_offset + dest.len() as u64;
+                    value_ids.insert(value.clone(), id);
+                    value.serialize(&mut rmp_serde::Serializer::new(dest))?;
+                    cache_items.push(SerializedNodeOrValue::Value(id, value));
+                    id
+                }
+            },
         })
     }
 
     /// Gets a snapshot of the tree, which can be used for reads.
     pub fn tree(&self) -> Tree {
         Tree {
-            loader: Loader(self.f.clone()),
+            loader: self.loader.clone(),
             inner: self.tree.clone(),
         }
     }
@@ -361,20 +487,30 @@ impl Partition {
     /// Makes a modification to the tree and commits it to disk.
     pub fn commit<F: FnOnce(Tree) -> Result<Tree>>(&mut self, f: F) -> Result<()> {
         let tree = f(Tree {
-            loader: Loader(self.f.clone()),
+            loader: self.loader.clone(),
             inner: self.tree.clone(),
         })?;
         let tree = tree.into_inner();
         if !tree.is_persisted() {
             let mut f = self.f.lock().expect("the lock should not be poisoned");
-            let (tree, buf) = Self::serialize_tree(
+            // TODO: we should serialize before locking the file
+            let tree = Self::serialize_tree(
                 tree,
                 f.size() + append_only_file::ENTRY_PREFIX_LENGTH as u64,
             )
             .with_context(|| "unable to serialize tree")?;
-            f.append(&buf)
+            f.append(&tree.data)
                 .with_context(|| "unable to append tree to append-only file")?;
-            self.tree = tree;
+            self.tree = tree.tree;
+            for (offset, item) in tree.cache_items.into_iter() {
+                self.loader.cache.insert(
+                    cache::Key {
+                        partition: self.loader.partition,
+                        offset,
+                    },
+                    item,
+                )
+            }
         }
         Ok(())
     }
@@ -406,7 +542,7 @@ mod tests {
 
         // write to the partition
         {
-            let mut partition = Partition::open(&path).unwrap();
+            let mut partition = Partition::open(&path, 0, Arc::new(Cache::new())).unwrap();
 
             partition
                 .commit(|tree| {
@@ -422,12 +558,42 @@ mod tests {
 
         // make sure the data is still there
         {
-            let partition = Partition::open(&path).unwrap();
+            let partition = Partition::open(&path, 0, Arc::new(Cache::new())).unwrap();
 
             assert_eq!(
                 partition.tree().get(&primary_key("foo", "a")).unwrap(),
                 Some(Value::Bytes("bar".into()))
             );
         }
+    }
+
+    // When we insert a value with a secondary sort key, it gets inserted into both trees. Let's
+    // make sure we're not actually writing that value to the file twice though.
+    #[test]
+    fn test_partition_value_deduplication() {
+        let dir = TempDir::new("partition-test").unwrap();
+        let path = dir.path().join("partition");
+
+        {
+            let mut partition = Partition::open(&path, 0, Arc::new(Cache::new())).unwrap();
+            partition
+                .commit(|tree| {
+                    tree.insert(key("foo", "1", Some("2")), |_| {
+                        Some(Value::Bytes("dedupme".into()))
+                    })
+                })
+                .unwrap();
+        }
+
+        let mut f = std::fs::File::open(path).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+
+        assert_eq!(
+            buf.windows(7)
+                .filter(|b| *b == "dedupme".as_bytes())
+                .count(),
+            1
+        );
     }
 }

@@ -58,7 +58,7 @@ impl AppendOnlyFile {
         crc.update(&data);
         self.f.write_all(&crc.finalize().to_be_bytes())?;
         self.f.write_all(&data)?;
-        self.f.sync_data()?;
+        // TODO: is syncing worth the insane performance hit?
         self.last_entry_offset = Some(self.size);
         self.size += ENTRY_PREFIX_LENGTH as u64 + len as u64;
         Ok(())

@@ -8,7 +8,7 @@ pub struct Key<H, S> {
     pub secondary_sort: Option<S>,
 }
 
-#[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PrimaryKey<H, S> {
     pub hash: H,
     pub sort: S,
@@ -16,7 +16,7 @@ pub struct PrimaryKey<H, S> {
 
 pub type PrimaryNode<H, S, V> = BTreeNode<PrimaryKey<H, S>, Value<S, V>>;
 
-#[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SecondaryKey<H, S> {
     pub hash: H,
     pub secondary_sort: S,
@@ -25,7 +25,7 @@ pub struct SecondaryKey<H, S> {
 
 pub type SecondaryNode<H, S, V> = BTreeNode<SecondaryKey<H, S>, Value<S, V>>;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Value<S, V> {
     pub secondary_sort: Option<S>,
     pub value: V,

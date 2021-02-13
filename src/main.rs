@@ -1,3 +1,6 @@
+#![cfg_attr(feature = "benchmarks", feature(test))]
+#[cfg(feature = "benchmarks")]
+extern crate test;
 #[macro_use]
 extern crate slog;
 
@@ -10,6 +13,7 @@ use std::sync::Arc;
 mod append_only_file;
 mod b_tree;
 mod b_tree_2d;
+mod cache;
 mod client;
 mod node;
 mod partition;
