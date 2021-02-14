@@ -15,12 +15,12 @@ message Value {
     oneof value {
         bytes bytes = 1;
         sint64 int = 2;
-        ScalarArray set = 3;
+        ValueArray array = 3;
     }
 }
 
-message ScalarArray {
-    repeated Scalar scalars = 1;
+message ValueArray {
+    repeated Value values = 1;
 }
 
 message Error {
@@ -100,7 +100,7 @@ message SetResponse {
 
 message SetAddRequest {
     bytes key = 1;
-    repeated Scalar members = 2;
+    repeated Value members = 2;
 }
 
 message SetAddResult {}
@@ -114,7 +114,7 @@ message SetAddResponse {
 
 message SetRemoveRequest {
     bytes key = 1;
-    repeated Scalar members = 2;
+    repeated Value members = 2;
 }
 
 message SetRemoveResult {}

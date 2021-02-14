@@ -1,8 +1,10 @@
 use super::{
     append_only_file::{self, AppendOnlyFile},
+    cache::{self, Cache},
+};
+use algorithms::{
     b_tree::{self, Tree as BTree},
     b_tree_2d::{self, Range},
-    cache::{self, Cache},
 };
 use anyhow::{Context, Error, Result};
 use bytes::Bytes;
@@ -76,7 +78,7 @@ impl From<&str> for Scalar {
 pub enum Value {
     Bytes(Bytes),
     Int(i64),
-    Set(Vec<Scalar>),
+    Array(Vec<Value>),
 }
 
 impl From<Bytes> for Value {

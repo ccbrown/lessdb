@@ -92,4 +92,4 @@ This a Rust program. Once you have the prerequisites installed you can...
 
 * `cargo run` to run it.
 * `cargo test` to run tests.
-* `cargo +nightly bench --features benchmarks` to run benchmarks.
+* `(cd lessdb && cargo +nightly bench --features benchmarks)` to run benchmarks.

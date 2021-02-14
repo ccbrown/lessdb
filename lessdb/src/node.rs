@@ -123,9 +123,10 @@ impl Node {
         Ok(did_delete)
     }
 
-    /// Adds one or more members to the set with the given key or creates it if it doesn't exist.
-    pub fn set_add<I: IntoIterator<Item = Scalar>>(&self, key: Hash, members: I) -> Result<()> {
-        let to_add: HashSet<Scalar> = members.into_iter().collect();
+    /// Adds one or more members to an array if they aren't already present. The array is created
+    /// if it doesn't exist.
+    pub fn set_add<I: IntoIterator<Item = Value>>(&self, key: Hash, members: I) -> Result<()> {
+        let to_add: HashSet<Value> = members.into_iter().collect();
 
         let partition = &self.partitions[partition_number(&key)];
         let mut partition = partition.write().expect("the lock shouldn't be poisoned");
@@ -140,30 +141,30 @@ impl Node {
                     secondary_sort: None,
                 },
                 |prev| match prev {
-                    Some(Value::Set(members)) => {
+                    Some(Value::Array(members)) => {
                         let mut did_add = false;
-                        let mut members: HashSet<&Scalar> = members.into_iter().collect();
+                        let mut members: HashSet<&Value> = members.into_iter().collect();
                         for m in &to_add {
                             if members.insert(m) {
                                 did_add = true;
                             }
                         }
                         if did_add {
-                            Some(Value::Set(members.into_iter().cloned().collect()))
+                            Some(Value::Array(members.into_iter().cloned().collect()))
                         } else {
                             None
                         }
                     }
-                    _ => Some(Value::Set(to_add.into_iter().collect())),
+                    _ => Some(Value::Array(to_add.into_iter().collect())),
                 },
             )?)
         })?;
         Ok(())
     }
 
-    /// Removes one or more members from the set with the given key if it exists.
-    pub fn set_remove<I: IntoIterator<Item = Scalar>>(&self, key: Hash, members: I) -> Result<()> {
-        let to_remove: HashSet<Scalar> = members.into_iter().collect();
+    /// Removes one or more members from the array with the given key if it exists.
+    pub fn set_remove<I: IntoIterator<Item = Value>>(&self, key: Hash, members: I) -> Result<()> {
+        let to_remove: HashSet<Value> = members.into_iter().collect();
 
         let partition = &self.partitions[partition_number(&key)];
         let mut partition = partition.write().expect("the lock shouldn't be poisoned");
@@ -178,7 +179,7 @@ impl Node {
                     secondary_sort: None,
                 },
                 |prev| match prev {
-                    Some(Value::Set(members)) => {
+                    Some(Value::Array(members)) => {
                         let original_len = members.len();
                         let new_members: Vec<_> = members
                             .into_iter()
@@ -186,7 +187,7 @@ impl Node {
                             .cloned()
                             .collect();
                         if new_members.len() < original_len {
-                            Some(Value::Set(new_members))
+                            Some(Value::Array(new_members))
                         } else {
                             None
                         }

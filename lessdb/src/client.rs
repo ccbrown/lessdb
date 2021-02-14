@@ -84,8 +84,8 @@ impl TryFrom<proto::Value> for Value {
             Some(value) => Ok(match value {
                 proto::Value_oneof_value::bytes(bytes) => Value::Bytes(bytes.into()),
                 proto::Value_oneof_value::int(n) => Value::Int(n),
-                proto::Value_oneof_value::set(mut a) => Value::Set(
-                    a.take_scalars()
+                proto::Value_oneof_value::array(mut a) => Value::Array(
+                    a.take_values()
                         .into_iter()
                         .map(|v| v.try_into())
                         .collect::<Result<_, _>>()?,
@@ -124,10 +124,10 @@ impl Into<proto::Value> for Value {
         value.value = Some(match self {
             Self::Bytes(bytes) => proto::Value_oneof_value::bytes(bytes),
             Self::Int(n) => proto::Value_oneof_value::int(n),
-            Self::Set(values) => {
-                let mut a = proto::ScalarArray::new();
-                a.set_scalars(values.into_iter().map(|v| v.into()).collect());
-                proto::Value_oneof_value::set(a)
+            Self::Array(values) => {
+                let mut a = proto::ValueArray::new();
+                a.set_values(values.into_iter().map(|v| v.into()).collect());
+                proto::Value_oneof_value::array(a)
             }
         });
         value
@@ -367,7 +367,7 @@ impl Service for ServiceImpl {
             sink,
             |node| {
                 let key = req.key.try_into()?;
-                let members: Vec<Scalar> = req
+                let members: Vec<Value> = req
                     .members
                     .into_iter()
                     .map(|s| s.try_into())
@@ -396,7 +396,7 @@ impl Service for ServiceImpl {
             sink,
             |node| {
                 let key = req.key.try_into()?;
-                let members: Vec<Scalar> = req
+                let members: Vec<Value> = req
                     .members
                     .into_iter()
                     .map(|s| s.try_into())

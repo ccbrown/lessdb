@@ -1,0 +1,9 @@
+[package]
+name = "algorithms"
+version = "0.1.0"
+authors = ["Christopher Brown <ccbrown112@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+cached = "0.23.0"
+serde = { version = "1.0.123", features = ["derive", "rc"] }

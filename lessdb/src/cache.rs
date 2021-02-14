@@ -1,9 +1,5 @@
-use super::{
-    b_tree_2d,
-    partition::{self, Hash, Sort},
-};
-use cached::{stores::SizedCache, Cached};
-use std::sync::Mutex;
+use super::partition::{self, Hash, Sort};
+use algorithms::{b_tree_2d, cache::Cache as InnerCache};
 
 #[derive(Debug, Hash, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub struct Key {
@@ -21,29 +17,13 @@ pub enum Item {
     Value(Value),
 }
 
-struct InnerCache<V>(Mutex<SizedCache<Key, V>>);
-
-impl<V: Clone> InnerCache<V> {
-    fn new(size: usize) -> Self {
-        Self(Mutex::new(SizedCache::with_size(size)))
-    }
-
-    fn get(&self, key: &Key) -> Option<V> {
-        self.0.lock().expect("no poison").cache_get(key).cloned()
-    }
-
-    fn set(&self, key: Key, value: V) {
-        self.0.lock().expect("no poison").cache_set(key, value);
-    }
-}
-
 /// Keeps recently used items in memory so we don't have to hit the disk for everything. For
 /// example, items are placed in the cache right after they're written to disk as we're almost 100%
 /// sure to need at least the new root node again.
 pub struct Cache {
-    primary_node_cache: InnerCache<PrimaryNode>,
-    secondary_node_cache: InnerCache<SecondaryNode>,
-    value_cache: InnerCache<Value>,
+    primary_node_cache: InnerCache<Key, PrimaryNode>,
+    secondary_node_cache: InnerCache<Key, SecondaryNode>,
+    value_cache: InnerCache<Key, Value>,
 }
 
 impl Cache {

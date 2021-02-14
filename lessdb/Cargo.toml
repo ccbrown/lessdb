@@ -1,0 +1,36 @@
+[package]
+name = "lessdb"
+version = "0.1.0"
+authors = ["Christopher Brown <ccbrown112@gmail.com>"]
+edition = "2018"
+
+[features]
+default = []
+benchmarks = []
+
+[build-dependencies]
+protoc-grpcio = "3.0.0"
+
+[dependencies]
+clap = "2.33.3"
+serde = { version = "1.0.123", features = ["derive", "rc"] }
+anyhow = "1.0.38"
+byteorder = "1.4.2"
+crc32fast = "1.2.1"
+thiserror = "1.0.23"
+rmp-serde = "0.15.4"
+slog = "2.7.0"
+termios = "0.3.3"
+slog-term = "2.8.0"
+slog-async = "2.6.0"
+slog-json = "2.3.0"
+protobuf = { version = "2.22.0", features = ["with-bytes"] }
+bytes = { version = "1.0.1", features = ["serde"] }
+grpcio = { version = "0.7.1", default-features = false, features = ["protobuf-codec"] }
+futures = "0.3.12"
+algorithms = { path = "../algorithms" }
+
+[dev-dependencies]
+tempdir = "0.3.7"
+sha2 = "0.9.3"
+digest = "0.9.0"

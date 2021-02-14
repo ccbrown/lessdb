@@ -11,8 +11,6 @@ use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 mod append_only_file;
-mod b_tree;
-mod b_tree_2d;
 mod cache;
 mod client;
 mod node;
