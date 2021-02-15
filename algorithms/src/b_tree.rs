@@ -778,7 +778,7 @@ mod tests {
     struct Storage;
 
     impl Loader<i32, String> for Storage {
-        type Error = anyhow::Error;
+        type Error = ();
 
         fn load_node(&self, _id: u64) -> Result<Node<i32, String>, Self::Error> {
             panic!("the tests don't persist nodes")

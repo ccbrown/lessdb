@@ -1,5 +1,5 @@
 use super::{
-    node::{Node, SetCondition},
+    node::{AppendCondition, FilterPredicate, Node, SetCondition},
     partition::{IncorrectHashLengthError, Scalar, Value},
     protos::{
         client as proto,
@@ -299,13 +299,13 @@ impl Service for ServiceImpl {
                 let condition = req
                     .condition
                     .take()
-                    .and_then(|cond| cond.value)
+                    .and_then(|cond| cond.condition)
                     .map(|cond| -> Result<_, ValueError> {
                         Ok(match cond {
-                            proto::SetRequest_Condition_oneof_value::exists(exists) => {
+                            proto::SetRequest_Condition_oneof_condition::exists(exists) => {
                                 SetCondition::Exists(exists)
                             }
-                            proto::SetRequest_Condition_oneof_value::equals(value) => {
+                            proto::SetRequest_Condition_oneof_condition::equals(value) => {
                                 SetCondition::Equals(value.try_into()?)
                             }
                         })
@@ -356,59 +356,85 @@ impl Service for ServiceImpl {
         )
     }
 
-    fn set_add(
+    fn append(
         &mut self,
         ctx: ::grpcio::RpcContext,
-        req: proto::SetAddRequest,
-        sink: ::grpcio::UnarySink<proto::SetAddResponse>,
+        mut req: proto::AppendRequest,
+        sink: ::grpcio::UnarySink<proto::AppendResponse>,
     ) {
         self.handle_grpc_request(
             ctx,
             sink,
             |node| {
                 let key = req.key.try_into()?;
-                let members: Vec<Value> = req
-                    .members
+                let values: Vec<Value> = req
+                    .values
                     .into_iter()
                     .map(|s| s.try_into())
                     .collect::<Result<_, _>>()?;
-                node.set_add(key, members)
-                    .map(|_| proto::SetAddResult::new())
+                let condition = req
+                    .condition
+                    .take()
+                    .and_then(|cond| cond.condition)
+                    .map(|cond| -> Result<_, ValueError> {
+                        Ok(match cond {
+                            proto::AppendRequest_Condition_oneof_condition::contains_value(
+                                contains,
+                            ) => AppendCondition::ContainsValue(contains),
+                        })
+                    })
+                    .transpose()?;
+                node.append(key, values, condition)
+                    .map(|_| proto::AppendResult::new())
                     .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
-                    Ok(r) => proto::SetAddResponse_oneof_body::result(r),
-                    Err(e) => proto::SetAddResponse_oneof_body::error(e),
+                    Ok(r) => proto::AppendResponse_oneof_body::result(r),
+                    Err(e) => proto::AppendResponse_oneof_body::error(e),
                 })
             },
         )
     }
 
-    fn set_remove(
+    fn filter(
         &mut self,
         ctx: ::grpcio::RpcContext,
-        req: proto::SetRemoveRequest,
-        sink: ::grpcio::UnarySink<proto::SetRemoveResponse>,
+        mut req: proto::FilterRequest,
+        sink: ::grpcio::UnarySink<proto::FilterResponse>,
     ) {
         self.handle_grpc_request(
             ctx,
             sink,
             |node| {
                 let key = req.key.try_into()?;
-                let members: Vec<Value> = req
-                    .members
-                    .into_iter()
-                    .map(|s| s.try_into())
-                    .collect::<Result<_, _>>()?;
-                node.set_remove(key, members)
-                    .map(|_| proto::SetRemoveResult::new())
+                let predicate = req
+                    .predicate
+                    .take()
+                    .and_then(|p| p.predicate)
+                    .map(|p| -> Result<_, ValueError> {
+                        Ok(match p {
+                            proto::FilterRequest_Predicate_oneof_predicate::not_in(values) => {
+                                FilterPredicate::NotIn(
+                                    values
+                                        .values
+                                        .into_iter()
+                                        .map(|s| s.try_into())
+                                        .collect::<Result<_, _>>()?,
+                                )
+                            }
+                        })
+                    })
+                    .transpose()?
+                    .unwrap();
+                node.filter(key, predicate)
+                    .map(|_| proto::FilterResult::new())
                     .map_err(UserFacingError::InternalError)
             },
             |resp, r| {
                 resp.body = Some(match r {
-                    Ok(r) => proto::SetRemoveResponse_oneof_body::result(r),
-                    Err(e) => proto::SetRemoveResponse_oneof_body::error(e),
+                    Ok(r) => proto::FilterResponse_oneof_body::result(r),
+                    Err(e) => proto::FilterResponse_oneof_body::error(e),
                 })
             },
         )

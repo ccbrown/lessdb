@@ -76,7 +76,7 @@ message DeleteResponse {
 
 message SetRequest {
     message Condition {
-        oneof value {
+        oneof condition {
             bool exists = 1;
             Value equals = 2;
         }
@@ -98,31 +98,44 @@ message SetResponse {
     }
 }
 
-message SetAddRequest {
+message AppendRequest {
+    message Condition {
+        oneof condition {
+            bool contains_value = 1;
+        }
+    }
+
     bytes key = 1;
-    repeated Value members = 2;
+    repeated Value values = 2;
+    Condition condition = 3;
 }
 
-message SetAddResult {}
+message AppendResult {}
 
-message SetAddResponse {
+message AppendResponse {
     oneof body {
         Error error = 1;
-        SetAddResult result = 2;
+        AppendResult result = 2;
     }
 }
 
-message SetRemoveRequest {
+message FilterRequest {
+    message Predicate {
+        oneof predicate {
+            ValueArray not_in = 1;
+        }
+    }
+
     bytes key = 1;
-    repeated Value members = 2;
+    Predicate predicate = 2;
 }
 
-message SetRemoveResult {}
+message FilterResult {}
 
-message SetRemoveResponse {
+message FilterResponse {
     oneof body {
         Error error = 1;
-        SetRemoveResult result = 2;
+        FilterResult result = 2;
     }
 }
 
@@ -242,8 +255,8 @@ service Service {
     rpc get(GetRequest) returns (GetResponse);
     rpc set(SetRequest) returns (SetResponse);
     rpc delete(DeleteRequest) returns (DeleteResponse);
-    rpc set_add(SetAddRequest) returns (SetAddResponse);
-    rpc set_remove(SetRemoveRequest) returns (SetRemoveResponse);
+    rpc append(AppendRequest) returns (AppendResponse);
+    rpc filter(FilterRequest) returns (FilterResponse);
     rpc map_set(MapSetRequest) returns (MapSetResponse);
     rpc map_delete(MapDeleteRequest) returns (MapDeleteResponse);
     rpc map_get_range(MapGetRangeRequest) returns (MapGetRangeResponse);

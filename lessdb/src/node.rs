@@ -25,6 +25,36 @@ pub struct Node {
     partitions: Vec<RwLock<Partition>>,
 }
 
+pub enum AppendCondition {
+    ContainsValue(bool),
+}
+
+impl AppendCondition {
+    pub fn evaluate(&self, existing: &HashSet<&Value>, to_append: &Value) -> bool {
+        match *self {
+            Self::ContainsValue(contains) => contains == existing.contains(to_append),
+        }
+    }
+}
+
+pub enum FilterPredicate {
+    NotIn(Vec<Value>),
+}
+
+impl FilterPredicate {
+    pub fn evaluate(&self, values: Vec<Value>) -> Vec<Value> {
+        match self {
+            Self::NotIn(to_remove) => {
+                let to_remove: HashSet<&Value> = to_remove.into_iter().collect();
+                values
+                    .into_iter()
+                    .filter(|v| !to_remove.contains(v))
+                    .collect()
+            }
+        }
+    }
+}
+
 pub enum SetCondition {
     Exists(bool),
     Equals(Value),
@@ -123,11 +153,14 @@ impl Node {
         Ok(did_delete)
     }
 
-    /// Adds one or more members to an array if they aren't already present. The array is created
-    /// if it doesn't exist.
-    pub fn set_add<I: IntoIterator<Item = Value>>(&self, key: Hash, members: I) -> Result<()> {
-        let to_add: HashSet<Value> = members.into_iter().collect();
-
+    /// Appends one or more members to an array. The array is created if you add a value to an
+    /// array that doesn't exist.
+    pub fn append<I: IntoIterator<Item = Value>>(
+        &self,
+        key: Hash,
+        values: I,
+        condition: Option<AppendCondition>,
+    ) -> Result<()> {
         let partition = &self.partitions[partition_number(&key)];
         let mut partition = partition.write().expect("the lock shouldn't be poisoned");
 
@@ -141,31 +174,53 @@ impl Node {
                     secondary_sort: None,
                 },
                 |prev| match prev {
-                    Some(Value::Array(members)) => {
-                        let mut did_add = false;
-                        let mut members: HashSet<&Value> = members.into_iter().collect();
-                        for m in &to_add {
-                            if members.insert(m) {
-                                did_add = true;
+                    Some(Value::Array(existing)) => {
+                        let existing_set: HashSet<&Value> = existing.into_iter().collect();
+
+                        let to_add: Vec<_> = values
+                            .into_iter()
+                            .filter(|v| {
+                                condition
+                                    .as_ref()
+                                    .map(|c| c.evaluate(&existing_set, v))
+                                    .unwrap_or(true)
+                            })
+                            .collect();
+
+                        if !to_add.is_empty() {
+                            let mut new_values = existing.clone();
+                            for m in to_add {
+                                new_values.push(m);
                             }
-                        }
-                        if did_add {
-                            Some(Value::Array(members.into_iter().cloned().collect()))
+                            Some(Value::Array(new_values))
                         } else {
                             None
                         }
                     }
-                    _ => Some(Value::Array(to_add.into_iter().collect())),
+                    _ => {
+                        let to_add: Vec<_> = values
+                            .into_iter()
+                            .filter(|v| {
+                                condition
+                                    .as_ref()
+                                    .map(|c| c.evaluate(&HashSet::new(), v))
+                                    .unwrap_or(true)
+                            })
+                            .collect();
+                        if !to_add.is_empty() {
+                            Some(Value::Array(to_add))
+                        } else {
+                            None
+                        }
+                    }
                 },
             )?)
         })?;
         Ok(())
     }
 
-    /// Removes one or more members from the array with the given key if it exists.
-    pub fn set_remove<I: IntoIterator<Item = Value>>(&self, key: Hash, members: I) -> Result<()> {
-        let to_remove: HashSet<Value> = members.into_iter().collect();
-
+    /// Filters the array with the given key if it exists.
+    pub fn filter(&self, key: Hash, predicate: FilterPredicate) -> Result<()> {
         let partition = &self.partitions[partition_number(&key)];
         let mut partition = partition.write().expect("the lock shouldn't be poisoned");
 
@@ -179,15 +234,10 @@ impl Node {
                     secondary_sort: None,
                 },
                 |prev| match prev {
-                    Some(Value::Array(members)) => {
-                        let original_len = members.len();
-                        let new_members: Vec<_> = members
-                            .into_iter()
-                            .filter(|m| !to_remove.contains(m))
-                            .cloned()
-                            .collect();
-                        if new_members.len() < original_len {
-                            Some(Value::Array(new_members))
+                    Some(Value::Array(values)) => {
+                        let new_values = predicate.evaluate(values.clone());
+                        if new_values.len() < values.len() {
+                            Some(Value::Array(new_values))
                         } else {
                             None
                         }

@@ -308,7 +308,7 @@ mod tests {
     struct Storage;
 
     impl Loader<i32, i32, String> for Storage {
-        type Error = anyhow::Error;
+        type Error = ();
 
         fn load_primary_node(
             &self,
