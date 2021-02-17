@@ -28,6 +28,7 @@ dependencies = [
 name = "algorithms"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "cached",
  "serde",
 ]

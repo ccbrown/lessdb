@@ -1,91 +1,101 @@
-use super::b_tree::{Loader as BTreeLoader, Node as BTreeNode, Range as BTreeRange, Tree as BTree};
+use super::b_tree::{Loader, Node as BTreeNode, Range as BTreeRange, Tree as BTree};
+use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Key<H, S> {
-    pub primary: PrimaryKey<H, S>,
-    pub secondary_sort: Option<S>,
+pub struct Key {
+    pub primary: PrimaryKey,
+    pub secondary_sort: Option<Bytes>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct PrimaryKey<H, S> {
-    pub hash: H,
-    pub sort: S,
+pub struct PrimaryKey {
+    pub hash: Bytes,
+    pub sort: Bytes,
 }
 
-pub type PrimaryNode<H, S, V> = BTreeNode<PrimaryKey<H, S>, Value<S, V>>;
+const ESCAPE_BYTE: u8 = 1;
+
+impl PrimaryKey {
+    fn normalize(&self) -> Bytes {
+        if self.sort.is_empty() {
+            self.hash.clone()
+        } else {
+            let mut ret = BytesMut::with_capacity(self.hash.len() + self.sort.len());
+            ret.extend_from_slice(&self.hash);
+            ret.extend_from_slice(&self.sort);
+            ret.freeze()
+        }
+    }
+
+    fn normalize_bound(b: Bound<&Self>) -> Bound<Bytes> {
+        match b {
+            Bound::Unbounded => Bound::Unbounded,
+            Bound::Included(k) => Bound::Included(k.normalize()),
+            Bound::Excluded(k) => Bound::Excluded(k.normalize()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SecondaryKey<H, S> {
-    pub hash: H,
-    pub secondary_sort: S,
-    pub primary_sort: S,
+pub struct SecondaryKey {
+    pub hash: Bytes,
+    pub secondary_sort: Bytes,
+    pub primary_sort: Bytes,
 }
 
-pub type SecondaryNode<H, S, V> = BTreeNode<SecondaryKey<H, S>, Value<S, V>>;
+impl SecondaryKey {
+    fn normalize(&self) -> Bytes {
+        if self.primary_sort.is_empty() && self.secondary_sort.is_empty() {
+            self.hash.clone()
+        } else {
+            let mut ret = BytesMut::with_capacity(
+                self.hash.len() + (self.secondary_sort.len() + self.primary_sort.len()) * 2,
+            );
+            ret.extend_from_slice(&self.hash);
+
+            for &b in &self.secondary_sort {
+                if b == 0 || b == ESCAPE_BYTE {
+                    ret.put_u8(ESCAPE_BYTE);
+                }
+                ret.put_u8(b);
+            }
+            ret.put_u8(0);
+
+            ret.extend_from_slice(&self.primary_sort);
+
+            ret.freeze()
+        }
+    }
+
+    fn normalize_bound(b: Bound<&Self>) -> Bound<Bytes> {
+        match b {
+            Bound::Unbounded => Bound::Unbounded,
+            Bound::Included(k) => Bound::Included(k.normalize()),
+            Bound::Excluded(k) => Bound::Excluded(k.normalize()),
+        }
+    }
+}
+
+pub type NormalizedNode<V> = BTreeNode<Bytes, Value<V>>;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Value<S, V> {
-    pub secondary_sort: Option<S>,
+pub struct Value<V> {
+    pub secondary_sort: Option<Bytes>,
     pub value: V,
 }
 
-/// Implements a "2D" B+tree which combines two B+trees to allow for indexing by up to 2
-/// dimensions.
-#[derive(Clone)]
-pub struct Tree<H: Clone, S: Clone, V: Clone> {
-    pub primary_tree: BTree<PrimaryKey<H, S>, Value<S, V>>,
-    pub secondary_tree: BTree<SecondaryKey<H, S>, Value<S, V>>,
+#[derive(Clone, Debug)]
+pub struct Tree<V: Clone> {
+    pub primary_tree: BTree<Bytes, Value<V>>,
+    pub secondary_tree: BTree<Bytes, Value<V>>,
 }
 
-pub trait Loader<H: Clone, S: Clone, V: Clone> {
-    type Error;
+pub struct Range<'a, V: Clone, L, B>(BTreeRange<'a, Bytes, Value<V>, L, B>);
 
-    fn load_primary_node(&self, id: u64) -> Result<PrimaryNode<H, S, V>, Self::Error>;
-    fn load_secondary_node(&self, id: u64) -> Result<SecondaryNode<H, S, V>, Self::Error>;
-    fn load_value(&self, id: u64) -> Result<Value<S, V>, Self::Error>;
-}
-
-impl<H: Clone, S: Clone, V: Clone, E, L: Loader<H, S, V, Error = E>>
-    BTreeLoader<PrimaryKey<H, S>, Value<S, V>> for L
-{
-    type Error = E;
-
-    fn load_node(&self, id: u64) -> Result<PrimaryNode<H, S, V>, Self::Error> {
-        self.load_primary_node(id)
-    }
-
-    fn load_value(&self, id: u64) -> Result<Value<S, V>, Self::Error> {
-        self.load_value(id)
-    }
-}
-
-impl<H: Clone, S: Clone, V: Clone, E, L: Loader<H, S, V, Error = E>>
-    BTreeLoader<SecondaryKey<H, S>, Value<S, V>> for L
-{
-    type Error = E;
-
-    fn load_node(&self, id: u64) -> Result<SecondaryNode<H, S, V>, Self::Error> {
-        self.load_secondary_node(id)
-    }
-
-    fn load_value(&self, id: u64) -> Result<Value<S, V>, Self::Error> {
-        self.load_value(id)
-    }
-}
-
-pub struct Range<'a, K: Clone, S: Clone, V: Clone, L, B>(BTreeRange<'a, K, Value<S, V>, L, B>);
-
-impl<
-        'a,
-        K: Clone + Ord,
-        S: Clone,
-        V: Clone,
-        E,
-        L: BTreeLoader<K, Value<S, V>, Error = E>,
-        B: RangeBounds<K>,
-    > Iterator for Range<'a, K, S, V, L, B>
+impl<'a, V: Clone, E, L: Loader<Bytes, Value<V>, Error = E>, B: RangeBounds<Bytes>> Iterator
+    for Range<'a, V, L, B>
 {
     type Item = Result<V, E>;
 
@@ -94,22 +104,15 @@ impl<
     }
 }
 
-impl<
-        'a,
-        K: Clone + Ord,
-        S: Clone,
-        V: Clone,
-        E,
-        L: BTreeLoader<K, Value<S, V>, Error = E>,
-        B: RangeBounds<K>,
-    > DoubleEndedIterator for Range<'a, K, S, V, L, B>
+impl<'a, V: Clone, E, L: Loader<Bytes, Value<V>, Error = E>, B: RangeBounds<Bytes>>
+    DoubleEndedIterator for Range<'a, V, L, B>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.0.next_back().map(|v| v.map(|v| v.value))
     }
 }
 
-impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
+impl<V: Clone> Tree<V> {
     /// Creates a new, empty B-tree.
     pub fn new() -> Self {
         Self {
@@ -118,7 +121,10 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
         }
     }
 
-    pub fn is_empty<E, L: Loader<H, S, V, Error = E>>(&self, loader: &L) -> Result<bool, E> {
+    pub fn is_empty<E, L: Loader<Bytes, Value<V>, Error = E>>(
+        &self,
+        loader: &L,
+    ) -> Result<bool, E> {
         self.primary_tree.is_empty(loader)
     }
 
@@ -127,86 +133,115 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     }
 
     /// Gets an item from the B-tree, if it exists.
-    pub fn get<E, L: Loader<H, S, V, Error = E>>(
+    pub fn get<E, L: Loader<Bytes, Value<V>, Error = E>>(
         &self,
         loader: &L,
-        key: &PrimaryKey<H, S>,
+        key: &PrimaryKey,
     ) -> Result<Option<V>, E> {
-        Ok(self.primary_tree.get(loader, key)?.map(|v| v.value.clone()))
+        Ok(self
+            .primary_tree
+            .get(loader, &key.normalize())?
+            .map(|v| v.value.clone()))
     }
 
     /// Gets a range of items based on their primary key.
     pub fn get_range_by_primary_key<
         'a,
         E,
-        L: Loader<H, S, V, Error = E>,
-        B: RangeBounds<PrimaryKey<H, S>>,
+        L: Loader<Bytes, Value<V>, Error = E>,
+        B: RangeBounds<PrimaryKey>,
     >(
         &'a self,
         loader: &'a L,
         bounds: B,
-    ) -> Range<'a, PrimaryKey<H, S>, S, V, L, B> {
-        Range(self.primary_tree.get_range(loader, bounds))
+    ) -> Range<'a, V, L, (Bound<Bytes>, Bound<Bytes>)> {
+        Range(self.primary_tree.get_range(
+            loader,
+            (
+                PrimaryKey::normalize_bound(bounds.start_bound()),
+                PrimaryKey::normalize_bound(bounds.end_bound()),
+            ),
+        ))
     }
 
     /// Counts a range of items based on their primary key.
     pub fn count_range_by_primary_key<
         'a,
         E,
-        L: Loader<H, S, V, Error = E>,
-        B: RangeBounds<PrimaryKey<H, S>>,
+        L: Loader<Bytes, Value<V>, Error = E>,
+        B: RangeBounds<PrimaryKey>,
     >(
         &'a self,
         loader: &'a L,
         bounds: B,
     ) -> Result<u64, E> {
-        self.primary_tree.count(loader, bounds)
+        self.primary_tree.count(
+            loader,
+            (
+                PrimaryKey::normalize_bound(bounds.start_bound()),
+                PrimaryKey::normalize_bound(bounds.end_bound()),
+            ),
+        )
     }
 
     /// Gets a range of items based on their secondary key.
     pub fn get_range_by_secondary_key<
         'a,
         E,
-        L: Loader<H, S, V, Error = E>,
-        B: RangeBounds<SecondaryKey<H, S>>,
+        L: Loader<Bytes, Value<V>, Error = E>,
+        B: RangeBounds<SecondaryKey>,
     >(
         &'a self,
         loader: &'a L,
         bounds: B,
-    ) -> Range<'a, SecondaryKey<H, S>, S, V, L, B> {
-        Range(self.secondary_tree.get_range(loader, bounds))
+    ) -> Range<'a, V, L, (Bound<Bytes>, Bound<Bytes>)> {
+        Range(self.secondary_tree.get_range(
+            loader,
+            (
+                SecondaryKey::normalize_bound(bounds.start_bound()),
+                SecondaryKey::normalize_bound(bounds.end_bound()),
+            ),
+        ))
     }
 
     /// Counts a range of items based on their secondary key.
     pub fn count_range_by_secondary_key<
         'a,
         E,
-        L: Loader<H, S, V, Error = E>,
-        B: RangeBounds<SecondaryKey<H, S>>,
+        L: Loader<Bytes, Value<V>, Error = E>,
+        B: RangeBounds<SecondaryKey>,
     >(
         &'a self,
         loader: &'a L,
         bounds: B,
     ) -> Result<u64, E> {
-        self.secondary_tree.count(loader, bounds)
+        self.secondary_tree.count(
+            loader,
+            (
+                SecondaryKey::normalize_bound(bounds.start_bound()),
+                SecondaryKey::normalize_bound(bounds.end_bound()),
+            ),
+        )
     }
 
     /// Inserts a new item into the B-tree or updates an existing one.
-    pub fn insert<E, L: Loader<H, S, V, Error = E>, F: FnOnce(Option<&V>) -> Option<V>>(
+    pub fn insert<E, L: Loader<Bytes, Value<V>, Error = E>, F: FnOnce(Option<&V>) -> Option<V>>(
         &self,
         loader: &L,
-        key: Key<H, S>,
+        key: Key,
         value: F,
     ) -> Result<Self, E> {
         let mut new_value = None;
         let mut prev_value = None;
 
+        let primary_key = key.primary.normalize();
+
         let (primary_tree, _) = match self.primary_tree.insert_conditionally(
             loader,
-            key.primary.clone(),
+            primary_key.clone(),
             |loader, prev| {
                 prev_value = match prev {
-                    Some(prev) => Some(prev.clone().load::<_, SecondaryKey<H, S>, _>(loader)?),
+                    Some(prev) => Some(prev.clone().load(loader)?),
                     None => None,
                 };
                 Ok(
@@ -233,7 +268,8 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
                         hash: key.primary.hash.clone(),
                         secondary_sort: prev_secondary_sort,
                         primary_sort: key.primary.sort.clone(),
-                    },
+                    }
+                    .normalize(),
                 )?;
                 tree
             }
@@ -247,7 +283,8 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
                     hash: key.primary.hash,
                     secondary_sort: secondary_sort,
                     primary_sort: key.primary.sort,
-                },
+                }
+                .normalize(),
                 new_value,
             )?;
             secondary_tree = tree;
@@ -260,14 +297,14 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     }
 
     /// Deletes a new item from the B-tree. Returns the previous value if the item existed.
-    pub fn delete<E, L: Loader<H, S, V, Error = E>>(
+    pub fn delete<E, L: Loader<Bytes, Value<V>, Error = E>>(
         &self,
         loader: &L,
-        key: &PrimaryKey<H, S>,
+        key: &PrimaryKey,
     ) -> Result<(Self, Option<V>), E> {
-        let (primary_tree, prev) = self.primary_tree.delete(loader, &key)?;
+        let (primary_tree, prev) = self.primary_tree.delete(loader, &key.normalize())?;
         let prev = prev
-            .map(|prev| -> Result<_, _> { Ok(prev.load::<_, SecondaryKey<H, S>, _>(loader)?) })
+            .map(|prev| -> Result<_, _> { Ok(prev.load(loader)?) })
             .transpose()?;
 
         let secondary_tree = match prev.as_ref().and_then(|prev| prev.secondary_sort.clone()) {
@@ -278,7 +315,8 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
                         hash: key.hash.clone(),
                         secondary_sort: prev_secondary_sort,
                         primary_sort: key.sort.clone(),
-                    },
+                    }
+                    .normalize(),
                 )?;
                 tree
             }
@@ -295,7 +333,10 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
     }
 
     #[cfg(test)]
-    pub fn assert_invariants<E: std::fmt::Debug, L: Loader<H, S, V, Error = E>>(&self, loader: &L) {
+    pub fn assert_invariants<E: std::fmt::Debug, L: Loader<Bytes, Value<V>, Error = E>>(
+        &self,
+        loader: &L,
+    ) {
         self.primary_tree.assert_invariants(loader);
         self.secondary_tree.assert_invariants(loader);
     }
@@ -304,47 +345,51 @@ impl<H: Ord + Clone, S: Ord + Clone, V: Clone> Tree<H, S, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::b_tree::Node;
 
     struct Storage;
 
-    impl Loader<i32, i32, String> for Storage {
+    impl Loader<Bytes, Value<String>> for Storage {
         type Error = ();
 
-        fn load_primary_node(
-            &self,
-            _id: u64,
-        ) -> Result<PrimaryNode<i32, i32, String>, Self::Error> {
+        fn load_node(&self, _id: u64) -> Result<Node<Bytes, Value<String>>, Self::Error> {
             panic!("the tests don't persist nodes")
         }
 
-        fn load_secondary_node(
-            &self,
-            _id: u64,
-        ) -> Result<SecondaryNode<i32, i32, String>, Self::Error> {
-            panic!("the tests don't persist nodes")
-        }
-
-        fn load_value(&self, _id: u64) -> Result<Value<i32, String>, Self::Error> {
+        fn load_value(&self, _id: u64) -> Result<Value<String>, Self::Error> {
             panic!("the tests don't persist values")
         }
+    }
+
+    fn bytes(n: i32) -> Bytes {
+        i32::to_be_bytes(n).to_vec().into()
     }
 
     #[test]
     fn test_tree() {
         let storage = Storage;
 
-        let mut root = Tree::<i32, i32, String>::new();
+        let mut root = Tree::<String>::new();
         assert_eq!(
-            root.get(&storage, &PrimaryKey { hash: 1, sort: 1 })
-                .unwrap(),
+            root.get(
+                &storage,
+                &PrimaryKey {
+                    hash: bytes(1),
+                    sort: bytes(1)
+                }
+            )
+            .unwrap(),
             None
         );
 
-        let primary_key = |i| PrimaryKey { hash: i, sort: i };
+        let primary_key = |i| PrimaryKey {
+            hash: bytes(i),
+            sort: bytes(i),
+        };
 
         let key = |i| Key {
             primary: primary_key(i),
-            secondary_sort: Some(i),
+            secondary_sort: Some(bytes(i)),
         };
 
         // insert some arbitrary values

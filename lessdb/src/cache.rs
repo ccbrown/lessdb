@@ -1,5 +1,5 @@
-use super::partition::{self, Hash, Sort};
-use algorithms::{b_tree_2d, cache::Cache as InnerCache};
+use super::partition::{self};
+use algorithms::{cache::Cache as InnerCache, indexed_b_tree};
 
 #[derive(Debug, Hash, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub struct Key {
@@ -7,13 +7,11 @@ pub struct Key {
     pub offset: u64,
 }
 
-type PrimaryNode = b_tree_2d::PrimaryNode<Hash, Sort, partition::Value>;
-type SecondaryNode = b_tree_2d::SecondaryNode<Hash, Sort, partition::Value>;
-type Value = b_tree_2d::Value<Sort, partition::Value>;
+type Node = indexed_b_tree::NormalizedNode<partition::Value>;
+type Value = indexed_b_tree::Value<partition::Value>;
 
 pub enum Item {
-    PrimaryNode(PrimaryNode),
-    SecondaryNode(SecondaryNode),
+    Node(Node),
     Value(Value),
 }
 
@@ -21,8 +19,7 @@ pub enum Item {
 /// example, items are placed in the cache right after they're written to disk as we're almost 100%
 /// sure to need at least the new root node again.
 pub struct Cache {
-    primary_node_cache: InnerCache<Key, PrimaryNode>,
-    secondary_node_cache: InnerCache<Key, SecondaryNode>,
+    node_cache: InnerCache<Key, Node>,
     value_cache: InnerCache<Key, Value>,
 }
 
@@ -30,37 +27,21 @@ impl Cache {
     pub fn new() -> Self {
         Self {
             // TODO: these parameters should probably be tunable
-            primary_node_cache: InnerCache::new(5000),
-            secondary_node_cache: InnerCache::new(5000),
+            node_cache: InnerCache::new(5000),
             value_cache: InnerCache::new(5000),
         }
     }
 
-    pub fn get_primary_node<E, F: FnOnce() -> Result<PrimaryNode, E>>(
+    pub fn get_node<E, F: FnOnce() -> Result<Node, E>>(
         &self,
         key: Key,
         recompute: F,
-    ) -> Result<PrimaryNode, E> {
-        match self.primary_node_cache.get(&key) {
+    ) -> Result<Node, E> {
+        match self.node_cache.get(&key) {
             Some(hit) => Ok(hit),
             None => {
                 let node = recompute()?;
-                self.primary_node_cache.set(key, node.clone());
-                Ok(node)
-            }
-        }
-    }
-
-    pub fn get_secondary_node<E, F: FnOnce() -> Result<SecondaryNode, E>>(
-        &self,
-        key: Key,
-        recompute: F,
-    ) -> Result<SecondaryNode, E> {
-        match self.secondary_node_cache.get(&key) {
-            Some(hit) => Ok(hit),
-            None => {
-                let node = recompute()?;
-                self.secondary_node_cache.set(key, node.clone());
+                self.node_cache.set(key, node.clone());
                 Ok(node)
             }
         }
@@ -83,11 +64,8 @@ impl Cache {
 
     pub fn insert(&self, key: Key, item: Item) {
         match item {
-            Item::PrimaryNode(node) => {
-                self.primary_node_cache.set(key, node);
-            }
-            Item::SecondaryNode(node) => {
-                self.secondary_node_cache.set(key, node);
+            Item::Node(node) => {
+                self.node_cache.set(key, node);
             }
             Item::Value(v) => {
                 self.value_cache.set(key, v);

@@ -1,5 +1,7 @@
-use std::collections::VecDeque;
-use std::ops::{Bound, RangeBounds};
+use std::{
+    collections::VecDeque,
+    ops::{Bound, RangeBounds},
+};
 
 const MAX_NODE_CHILDREN: usize = 6;
 const MIN_NODE_CHILDREN: usize = MAX_NODE_CHILDREN / 2;
@@ -76,7 +78,7 @@ impl<K: Clone + Ord, V: Clone> Node<K, V> {
         }
     }
 
-    fn len(&self) -> u64 {
+    pub fn len(&self) -> u64 {
         match self {
             Node::Internal { children, .. } => children.iter().map(|c| c.len).sum(),
             Node::Leaf { keys, .. } => keys.len() as _,
