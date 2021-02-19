@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::{
     collections::VecDeque,
     ops::{Bound, RangeBounds},
@@ -6,13 +7,36 @@ use std::{
 const MAX_NODE_CHILDREN: usize = 6;
 const MIN_NODE_CHILDREN: usize = MAX_NODE_CHILDREN / 2;
 
+pub trait Key: Clone + Ord {
+    fn separator(&self, right: &Self) -> Self {
+        right.clone()
+    }
+}
+
+#[cfg(test)]
+impl Key for i32 {
+    fn separator(&self, _right: &Self) -> Self {
+        self + 1
+    }
+}
+
+impl Key for Bytes {
+    fn separator(&self, right: &Self) -> Self {
+        let mut i = 0;
+        while self[i] == right[i] {
+            i += 1;
+        }
+        right.slice(0..i + 1)
+    }
+}
+
 #[derive(Clone, Debug)]
-pub enum Tree<K: Clone, V: Clone> {
+pub enum Tree<K: Key, V: Clone> {
     Persisted { id: u64 },
     Volatile { node: Node<K, V> },
 }
 
-impl<K: Clone, V: Clone> Tree<K, V> {
+impl<K: Key, V: Clone> Tree<K, V> {
     pub fn load_node<E, L: Loader<K, V, Error = E>>(&self, loader: &L) -> Result<Node<K, V>, E> {
         match self {
             Self::Persisted { id } => loader.load_node(*id),
@@ -35,7 +59,7 @@ pub enum Value<V> {
 }
 
 impl<V: Clone> Value<V> {
-    pub fn load<E, K: Clone, L: Loader<K, V, Error = E>>(self, loader: &L) -> Result<V, E> {
+    pub fn load<E, K: Key, L: Loader<K, V, Error = E>>(self, loader: &L) -> Result<V, E> {
         match self {
             Self::Persisted { id } => loader.load_value(id),
             Self::Volatile { value, .. } => Ok(value),
@@ -44,12 +68,12 @@ impl<V: Clone> Value<V> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Child<K: Clone, V: Clone> {
+pub struct Child<K: Key, V: Clone> {
     pub len: u64,
     pub tree: Tree<K, V>,
 }
 
-impl<K: Clone + Ord, V: Clone> Into<Child<K, V>> for Node<K, V> {
+impl<K: Key, V: Clone> Into<Child<K, V>> for Node<K, V> {
     fn into(self) -> Child<K, V> {
         Child {
             len: self.len(),
@@ -59,7 +83,7 @@ impl<K: Clone + Ord, V: Clone> Into<Child<K, V>> for Node<K, V> {
 }
 
 #[derive(Clone, Debug)]
-pub enum Node<K: Clone, V: Clone> {
+pub enum Node<K: Key, V: Clone> {
     Internal {
         index: Vec<K>,
         children: Vec<Child<K, V>>,
@@ -70,7 +94,7 @@ pub enum Node<K: Clone, V: Clone> {
     },
 }
 
-impl<K: Clone + Ord, V: Clone> Node<K, V> {
+impl<K: Key, V: Clone> Node<K, V> {
     fn children(&self) -> usize {
         match self {
             Node::Internal { children, .. } => children.len(),
@@ -141,10 +165,11 @@ impl<K: Clone + Ord, V: Clone> Node<K, V> {
             } => {
                 let right_values = values.split_off(values.len() / 2);
                 let right_keys = keys.split_off(values.len());
+                let separator = keys[keys.len() - 1].separator(&right_keys[0]);
                 (
                     Node::Leaf { keys, values },
                     Some((
-                        right_keys[0].clone(),
+                        separator,
                         Node::Leaf {
                             keys: right_keys,
                             values: right_values,
@@ -186,20 +211,20 @@ impl<K: Clone + Ord, V: Clone> Node<K, V> {
     }
 }
 
-pub trait Loader<K: Clone, V: Clone> {
+pub trait Loader<K: Key, V: Clone> {
     type Error;
 
     fn load_node(&self, id: u64) -> Result<Node<K, V>, Self::Error>;
     fn load_value(&self, id: u64) -> Result<V, Self::Error>;
 }
 
-struct Deletion<K: Clone, V: Clone> {
+struct Deletion<K: Key, V: Clone> {
     left_key_if_changed: Option<K>,
     new_node: Node<K, V>,
     previous_value: Value<V>,
 }
 
-pub struct Range<'a, K: Clone, V: Clone, L, B> {
+pub struct Range<'a, K: Key, V: Clone, L, B> {
     tree: &'a Tree<K, V>,
     loader: &'a L,
     bounds: B,
@@ -207,15 +232,13 @@ pub struct Range<'a, K: Clone, V: Clone, L, B> {
     backward: Option<IteratorState<K, V>>,
 }
 
-struct IteratorState<K: Clone, V: Clone> {
+struct IteratorState<K: Key, V: Clone> {
     to_visit: Vec<VecDeque<Child<K, V>>>,
     keys: VecDeque<K>,
     values: VecDeque<Value<V>>,
 }
 
-impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>
-    Range<'a, K, V, L, B>
-{
+impl<'a, K: Key, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>> Range<'a, K, V, L, B> {
     fn new(tree: &'a Tree<K, V>, loader: &'a L, bounds: B) -> Self {
         Self {
             tree,
@@ -408,7 +431,7 @@ impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds
     }
 }
 
-impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>> Iterator
+impl<'a, K: Key, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>> Iterator
     for Range<'a, K, V, L, B>
 {
     type Item = Result<V, E>;
@@ -418,15 +441,15 @@ impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds
     }
 }
 
-impl<'a, K: Clone + Ord, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>>
-    DoubleEndedIterator for Range<'a, K, V, L, B>
+impl<'a, K: Key, V: Clone, E, L: Loader<K, V, Error = E>, B: RangeBounds<K>> DoubleEndedIterator
+    for Range<'a, K, V, L, B>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.get_next_back().transpose()
     }
 }
 
-impl<K: Ord + Clone, V: Clone> Tree<K, V> {
+impl<K: Key, V: Clone> Tree<K, V> {
     /// Creates a new, empty B-tree.
     pub fn new() -> Self {
         Self::Volatile {
@@ -544,9 +567,9 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
             (
                 match node.split_if_overflow() {
                     (a, None) => Tree::Volatile { node: a },
-                    (a, Some((b_key, b))) => Tree::Volatile {
+                    (a, Some((sep, b))) => Tree::Volatile {
                         node: Node::Internal {
-                            index: vec![b_key],
+                            index: vec![sep],
                             children: vec![a.into(), b.into()],
                         },
                     },
@@ -583,10 +606,10 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                                 new_children.push(a.into());
                                 index
                             }
-                            (a, Some((b_key, b))) => {
+                            (a, Some((sep, b))) => {
                                 let mut new_index = Vec::with_capacity(index.len() + 1);
                                 new_index.extend_from_slice(&index[..i]);
-                                new_index.push(b_key);
+                                new_index.push(sep);
                                 new_index.extend_from_slice(&index[i..]);
                                 new_children.push(a.into());
                                 new_children.push(b.into());
@@ -698,10 +721,10 @@ impl<K: Ord + Clone, V: Clone> Tree<K, V> {
                                     children.remove(left_node_idx);
                                     children[left_node_idx] = a.into();
                                 }
-                                (a, Some((b_key, b))) => {
+                                (a, Some((sep, b))) => {
                                     children[left_node_idx] = a.into();
                                     children[left_node_idx + 1] = b.into();
-                                    index.insert(left_node_idx, b_key);
+                                    index.insert(left_node_idx, sep);
                                 }
                             }
                             if left_node_idx == 0 {

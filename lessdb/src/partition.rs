@@ -825,7 +825,7 @@ mod tests {
         let f = AppendOnlyFile::open(path).unwrap();
         assert_eq!(
             f.size(),
-            340844,
+            268872,
             "last entry size = {}",
             f.size() - f.last_entry_offset().unwrap()
         );
