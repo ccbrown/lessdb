@@ -2,6 +2,8 @@
 
 LessDB is a key-value store meant to be similar to DynamoDB in scale and robustness, but with significantly higher performance.
 
+It's more or less feature complete for single node setups, but not really suitable for production as high availability features are not yet implemented.
+
 ## Goals
 
 * Redundant Storage: All data is replicated at least 3 times across distinct data centers.
@@ -75,8 +77,8 @@ will own about 61 partitions and require about 15TB of storage. At this scale,
 bringing new nodes into the cluster would take considerable time, but requests
 should remain nearly as fast as any other scale cluster.
 
-Partitions consist of an append-only "2D" B+tree where each modification
-appends a new root node to the partition. The "2D" B+tree is actually just two
+Partitions consist of an append-only "indexed" B+tree where each modification
+appends a new root node to the partition. The "indexed" B+tree is actually just two
 B+trees combined into one data structure. Items that have a secondary sort key
 are inserted into the secondary B+tree so they can be accessed based on this
 second dimension.
