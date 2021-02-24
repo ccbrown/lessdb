@@ -2,7 +2,7 @@
 
 LessDB is a key-value store meant to be similar to DynamoDB in scale and robustness, but with significantly higher performance.
 
-It's more or less feature complete for single node setups, but not really suitable for production as high availability features are not yet implemented.
+It's nearly feature complete for single node setups, but not really suitable for production as high availability features are not yet implemented.
 
 ## Goals
 
