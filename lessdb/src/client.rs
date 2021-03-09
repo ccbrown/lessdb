@@ -1,10 +1,13 @@
 use super::{
-    node::{AppendCondition, FilterPredicate, Node, SetCondition},
-    partition::{IncorrectHashLengthError, Scalar, Value},
+    node::{
+        Node, ReadExpression, ReadTransaction, TransactionError, WriteExpression,
+        WriteExpressionSetCondition, WriteTransaction,
+    },
     protos::{
         client as proto,
         client_grpc::{create_service, Service},
     },
+    storage::Value,
 };
 use anyhow::{Context, Error, Result};
 use futures::{FutureExt, TryFutureExt};
@@ -12,72 +15,145 @@ use grpcio::{ChannelBuilder, EnvBuilder, ResourceQuota, Server, ServerBuilder};
 use std::{
     convert::{TryFrom, TryInto},
     net::ToSocketAddrs,
-    ops::Bound,
     sync::Arc,
 };
 
 #[derive(Debug, thiserror::Error)]
-enum UserFacingError {
+pub enum UserFacingError {
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error("internal error")]
     InternalError(Error),
 }
 
-trait BadRequestError: std::error::Error {}
-
-// these errors and their messages can be converted directly into bad request errors
-impl BadRequestError for ScalarError {}
-impl BadRequestError for ValueError {}
-impl BadRequestError for IncorrectHashLengthError {}
-
-impl<E: BadRequestError> From<E> for UserFacingError {
-    fn from(e: E) -> Self {
-        Self::BadRequest(e.to_string())
+impl From<TransactionError> for UserFacingError {
+    fn from(e: TransactionError) -> Self {
+        match e {
+            TransactionError::ExpressionError(_) => Self::BadRequest(e.to_string()),
+            TransactionError::Other(_) => Self::InternalError(e.into()),
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-pub enum ScalarError {
-    #[error("missing required scalar")]
-    MissingRequiredScalar,
-}
+impl TryFrom<proto::ReadExpression> for ReadExpression {
+    type Error = UserFacingError;
 
-impl TryFrom<proto::Scalar> for Scalar {
-    type Error = ScalarError;
-
-    fn try_from(value: proto::Scalar) -> Result<Self, Self::Error> {
-        match value.value {
+    fn try_from(expr: proto::ReadExpression) -> Result<Self, Self::Error> {
+        match expr.expr {
             Some(value) => Ok(match value {
-                proto::Scalar_oneof_value::bytes(bytes) => Scalar::Bytes(bytes.into()),
-                proto::Scalar_oneof_value::int(n) => Scalar::Int(n),
+                proto::ReadExpression_oneof_expr::get(expr) => ReadExpression::Get {
+                    key: expr.key as _,
+                    dest: expr.dest as _,
+                },
+                proto::ReadExpression_oneof_expr::sequence(mut expr) => ReadExpression::Sequence {
+                    exprs: expr
+                        .take_exprs()
+                        .into_iter()
+                        .map(|e| e.try_into())
+                        .collect::<Result<_, _>>()?,
+                },
             }),
-            None => Err(ScalarError::MissingRequiredScalar),
+            None => Err(UserFacingError::BadRequest(
+                "missing expression".to_string(),
+            )),
         }
     }
 }
 
-impl TryFrom<Option<proto::Scalar>> for Scalar {
-    type Error = ScalarError;
+impl TryFrom<proto::ReadTransaction> for ReadTransaction {
+    type Error = UserFacingError;
 
-    fn try_from(value: Option<proto::Scalar>) -> Result<Self, Self::Error> {
-        match value {
-            Some(value) => value.try_into(),
-            None => Err(ScalarError::MissingRequiredScalar),
+    fn try_from(mut tx: proto::ReadTransaction) -> Result<Self, Self::Error> {
+        Ok(Self {
+            inputs: tx
+                .take_inputs()
+                .into_iter()
+                .map(|v| v.try_into())
+                .collect::<Result<_, _>>()?,
+            outputs: tx.take_outputs().into_iter().map(|v| v as _).collect(),
+            expr: match tx.expr.take() {
+                Some(expr) => expr.try_into()?,
+                None => {
+                    return Err(UserFacingError::BadRequest(
+                        "missing expression".to_string(),
+                    ))
+                }
+            },
+        })
+    }
+}
+
+impl TryFrom<proto::WriteExpression> for WriteExpression {
+    type Error = UserFacingError;
+
+    fn try_from(expr: proto::WriteExpression) -> Result<Self, Self::Error> {
+        match expr.expr {
+            Some(value) => {
+                Ok(match value {
+                    proto::WriteExpression_oneof_expr::clear(_) => WriteExpression::Clear {},
+                    proto::WriteExpression_oneof_expr::delete(expr) => {
+                        WriteExpression::Delete { key: expr.key as _ }
+                    }
+                    proto::WriteExpression_oneof_expr::set(mut expr) => WriteExpression::Set {
+                        key: expr.key as _,
+                        value: expr.value as _,
+                        condition: expr.condition.take().and_then(|cond| cond.condition).map(
+                            |cond| match cond {
+                                proto::WriteExpressionSet_Condition_oneof_condition::exists(
+                                    exists,
+                                ) => WriteExpressionSetCondition::Exists(exists),
+                                proto::WriteExpressionSet_Condition_oneof_condition::equals(
+                                    value,
+                                ) => WriteExpressionSetCondition::Equals(value as _),
+                            },
+                        ),
+                    },
+                    proto::WriteExpression_oneof_expr::read(expr) => WriteExpression::Read {
+                        expr: expr.try_into()?,
+                    },
+                    proto::WriteExpression_oneof_expr::sequence(mut expr) => {
+                        WriteExpression::Sequence {
+                            exprs: expr
+                                .take_exprs()
+                                .into_iter()
+                                .map(|e| e.try_into())
+                                .collect::<Result<_, _>>()?,
+                        }
+                    }
+                })
+            }
+            None => Err(UserFacingError::BadRequest(
+                "missing expression".to_string(),
+            )),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-pub enum ValueError {
-    #[error(transparent)]
-    ScalarError(#[from] ScalarError),
-    #[error("missing required value")]
-    MissingRequiredValue,
+impl TryFrom<proto::WriteTransaction> for WriteTransaction {
+    type Error = UserFacingError;
+
+    fn try_from(mut tx: proto::WriteTransaction) -> Result<Self, Self::Error> {
+        Ok(Self {
+            inputs: tx
+                .take_inputs()
+                .into_iter()
+                .map(|v| v.try_into())
+                .collect::<Result<_, _>>()?,
+            outputs: tx.take_outputs().into_iter().map(|v| v as _).collect(),
+            expr: match tx.expr.take() {
+                Some(expr) => expr.try_into()?,
+                None => {
+                    return Err(UserFacingError::BadRequest(
+                        "missing expression".to_string(),
+                    ))
+                }
+            },
+        })
+    }
 }
 
 impl TryFrom<proto::Value> for Value {
-    type Error = ValueError;
+    type Error = UserFacingError;
 
     fn try_from(value: proto::Value) -> Result<Self, Self::Error> {
         match value.value {
@@ -91,30 +167,23 @@ impl TryFrom<proto::Value> for Value {
                         .collect::<Result<_, _>>()?,
                 ),
             }),
-            None => Err(ValueError::MissingRequiredValue),
+            None => Err(UserFacingError::BadRequest(
+                "missing required value".to_string(),
+            )),
         }
     }
 }
 
 impl TryFrom<Option<proto::Value>> for Value {
-    type Error = ValueError;
+    type Error = UserFacingError;
 
     fn try_from(value: Option<proto::Value>) -> Result<Self, Self::Error> {
         match value {
             Some(value) => value.try_into(),
-            None => Err(ValueError::MissingRequiredValue),
+            None => Err(UserFacingError::BadRequest(
+                "missing required value".to_string(),
+            )),
         }
-    }
-}
-
-impl Into<proto::Scalar> for Scalar {
-    fn into(self) -> proto::Scalar {
-        let mut scalar = proto::Scalar::new();
-        scalar.value = Some(match self {
-            Self::Bytes(bytes) => proto::Scalar_oneof_value::bytes(bytes),
-            Self::Int(n) => proto::Scalar_oneof_value::int(n),
-        });
-        scalar
     }
 }
 
@@ -132,14 +201,6 @@ impl Into<proto::Value> for Value {
         });
         value
     }
-}
-
-fn convert_bound(bound: Option<proto::Bound>) -> Result<Bound<Scalar>, ValueError> {
-    Ok(match bound.and_then(|bound| bound.value) {
-        None => Bound::Unbounded,
-        Some(proto::Bound_oneof_value::included(scalar)) => Bound::Included(scalar.try_into()?),
-        Some(proto::Bound_oneof_value::excluded(scalar)) => Bound::Excluded(scalar.try_into()?),
-    })
 }
 
 pub struct API {
@@ -231,404 +292,65 @@ impl ServiceImpl {
 }
 
 impl Service for ServiceImpl {
-    fn clear_partitions(
+    fn read(
         &mut self,
         ctx: ::grpcio::RpcContext,
-        _req: proto::ClearPartitionsRequest,
-        sink: ::grpcio::UnarySink<proto::ClearPartitionsResponse>,
+        mut req: proto::ReadRequest,
+        sink: ::grpcio::UnarySink<proto::ReadResponse>,
     ) {
         self.handle_grpc_request(
             ctx,
             sink,
             |node| {
-                node.clear_partitions()
-                    .map(|_| proto::ClearPartitionsResult::new())
-                    .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::ClearPartitionsResponse_oneof_body::result(r),
-                    Err(e) => proto::ClearPartitionsResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn get(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        req: proto::GetRequest,
-        sink: ::grpcio::UnarySink<proto::GetResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                node.get(&key)
-                    .map(|value| {
-                        let mut result = proto::GetResult::new();
-                        if let Some(value) = value {
-                            result.set_value(value.into());
-                        }
-                        result
-                    })
-                    .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::GetResponse_oneof_body::result(r),
-                    Err(e) => proto::GetResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn set(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        mut req: proto::SetRequest,
-        sink: ::grpcio::UnarySink<proto::SetResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                let value = req.value.take().try_into()?;
-                let condition = req
-                    .condition
-                    .take()
-                    .and_then(|cond| cond.condition)
-                    .map(|cond| -> Result<_, ValueError> {
-                        Ok(match cond {
-                            proto::SetRequest_Condition_oneof_condition::exists(exists) => {
-                                SetCondition::Exists(exists)
-                            }
-                            proto::SetRequest_Condition_oneof_condition::equals(value) => {
-                                SetCondition::Equals(value.try_into()?)
-                            }
-                        })
-                    })
-                    .transpose()?;
-                node.set(key, value, condition)
-                    .map(|did_set| {
-                        let mut result = proto::SetResult::new();
-                        result.set_did_set(did_set);
-                        result
-                    })
-                    .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::SetResponse_oneof_body::result(r),
-                    Err(e) => proto::SetResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn delete(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        req: proto::DeleteRequest,
-        sink: ::grpcio::UnarySink<proto::DeleteResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                node.delete(&key)
-                    .map(|did_delete| {
-                        let mut result = proto::DeleteResult::new();
-                        result.set_did_delete(did_delete);
-                        result
-                    })
-                    .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::DeleteResponse_oneof_body::result(r),
-                    Err(e) => proto::DeleteResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn append(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        mut req: proto::AppendRequest,
-        sink: ::grpcio::UnarySink<proto::AppendResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                let values: Vec<Value> = req
-                    .values
+                let tx = req.take_tx().try_into()?;
+                let mut result = proto::ReadResult::default();
+                result.outputs = node
+                    .read(tx)?
                     .into_iter()
-                    .map(|s| s.try_into())
-                    .collect::<Result<_, _>>()?;
-                let condition = req
-                    .condition
-                    .take()
-                    .and_then(|cond| cond.condition)
-                    .map(|cond| -> Result<_, ValueError> {
-                        Ok(match cond {
-                            proto::AppendRequest_Condition_oneof_condition::contains_value(
-                                contains,
-                            ) => AppendCondition::ContainsValue(contains),
-                        })
+                    .map(|v| {
+                        let mut output = proto::ReadOutput::default();
+                        output.value = v.map(|v| v.into()).into();
+                        output
                     })
-                    .transpose()?;
-                node.append(key, values, condition)
-                    .map(|_| proto::AppendResult::new())
-                    .map_err(UserFacingError::InternalError)
+                    .collect();
+                Ok(result)
             },
             |resp, r| {
                 resp.body = Some(match r {
-                    Ok(r) => proto::AppendResponse_oneof_body::result(r),
-                    Err(e) => proto::AppendResponse_oneof_body::error(e),
+                    Ok(r) => proto::ReadResponse_oneof_body::result(r),
+                    Err(e) => proto::ReadResponse_oneof_body::error(e),
                 })
             },
         )
     }
 
-    fn filter(
+    fn write(
         &mut self,
         ctx: ::grpcio::RpcContext,
-        mut req: proto::FilterRequest,
-        sink: ::grpcio::UnarySink<proto::FilterResponse>,
+        mut req: proto::WriteRequest,
+        sink: ::grpcio::UnarySink<proto::WriteResponse>,
     ) {
         self.handle_grpc_request(
             ctx,
             sink,
             |node| {
-                let key = req.key.try_into()?;
-                let predicate = req
-                    .predicate
-                    .take()
-                    .and_then(|p| p.predicate)
-                    .map(|p| -> Result<_, ValueError> {
-                        Ok(match p {
-                            proto::FilterRequest_Predicate_oneof_predicate::not_in(values) => {
-                                FilterPredicate::NotIn(
-                                    values
-                                        .values
-                                        .into_iter()
-                                        .map(|s| s.try_into())
-                                        .collect::<Result<_, _>>()?,
-                                )
-                            }
-                        })
+                let tx = req.take_tx().try_into()?;
+                let mut result = proto::WriteResult::default();
+                result.outputs = node
+                    .write(tx)?
+                    .into_iter()
+                    .map(|v| {
+                        let mut output = proto::WriteOutput::default();
+                        output.value = v.map(|v| v.into()).into();
+                        output
                     })
-                    .transpose()?
-                    .unwrap();
-                node.filter(key, predicate)
-                    .map(|_| proto::FilterResult::new())
-                    .map_err(UserFacingError::InternalError)
+                    .collect();
+                Ok(result)
             },
             |resp, r| {
                 resp.body = Some(match r {
-                    Ok(r) => proto::FilterResponse_oneof_body::result(r),
-                    Err(e) => proto::FilterResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn map_set(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        mut req: proto::MapSetRequest,
-        sink: ::grpcio::UnarySink<proto::MapSetResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                let field = req.field.take().try_into()?;
-                let value = req.value.take().try_into()?;
-                let order = req.order.take().try_into()?;
-                node.map_set(key, field, value, order)
-                    .map(|_| proto::MapSetResult::new())
-                    .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::MapSetResponse_oneof_body::result(r),
-                    Err(e) => proto::MapSetResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn map_delete(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        mut req: proto::MapDeleteRequest,
-        sink: ::grpcio::UnarySink<proto::MapDeleteResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                let field = req.field.take().try_into()?;
-                node.map_delete(key, field)
-                    .map(|did_delete| {
-                        let mut result = proto::MapDeleteResult::new();
-                        result.set_did_delete(did_delete);
-                        result
-                    })
-                    .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::MapDeleteResponse_oneof_body::result(r),
-                    Err(e) => proto::MapDeleteResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn map_get_range(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        mut req: proto::MapGetRangeRequest,
-        sink: ::grpcio::UnarySink<proto::MapGetRangeResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                let start: Bound<Scalar> = convert_bound(req.start.take())?;
-                let end: Bound<Scalar> = convert_bound(req.end.take())?;
-                node.map_get_range(
-                    key,
-                    (start, end),
-                    if req.limit > 0 {
-                        Some(req.limit as usize)
-                    } else {
-                        None
-                    },
-                    req.reverse,
-                )
-                .map(|values| {
-                    let mut result = proto::MapGetRangeResult::new();
-                    result.set_values(values.into_iter().map(|v| v.into()).collect());
-                    result
-                })
-                .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::MapGetRangeResponse_oneof_body::result(r),
-                    Err(e) => proto::MapGetRangeResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn map_get_range_by_field(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        mut req: proto::MapGetRangeByFieldRequest,
-        sink: ::grpcio::UnarySink<proto::MapGetRangeByFieldResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                let start: Bound<Scalar> = convert_bound(req.start.take())?;
-                let end: Bound<Scalar> = convert_bound(req.end.take())?;
-                node.map_get_range_by_field(
-                    key,
-                    (start, end),
-                    if req.limit > 0 {
-                        Some(req.limit as usize)
-                    } else {
-                        None
-                    },
-                    req.reverse,
-                )
-                .map(|values| {
-                    let mut result = proto::MapGetRangeByFieldResult::new();
-                    result.set_values(values.into_iter().map(|v| v.into()).collect());
-                    result
-                })
-                .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::MapGetRangeByFieldResponse_oneof_body::result(r),
-                    Err(e) => proto::MapGetRangeByFieldResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn map_count_range(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        mut req: proto::MapCountRangeRequest,
-        sink: ::grpcio::UnarySink<proto::MapCountRangeResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                let start: Bound<Scalar> = convert_bound(req.start.take())?;
-                let end: Bound<Scalar> = convert_bound(req.end.take())?;
-                node.map_count_range(key, (start, end))
-                    .map(|count| {
-                        let mut result = proto::MapCountRangeResult::new();
-                        result.count = count;
-                        result
-                    })
-                    .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::MapCountRangeResponse_oneof_body::result(r),
-                    Err(e) => proto::MapCountRangeResponse_oneof_body::error(e),
-                })
-            },
-        )
-    }
-
-    fn map_count_range_by_field(
-        &mut self,
-        ctx: ::grpcio::RpcContext,
-        mut req: proto::MapCountRangeByFieldRequest,
-        sink: ::grpcio::UnarySink<proto::MapCountRangeByFieldResponse>,
-    ) {
-        self.handle_grpc_request(
-            ctx,
-            sink,
-            |node| {
-                let key = req.key.try_into()?;
-                let start: Bound<Scalar> = convert_bound(req.start.take())?;
-                let end: Bound<Scalar> = convert_bound(req.end.take())?;
-                node.map_count_range_by_field(key, (start, end))
-                    .map(|count| {
-                        let mut result = proto::MapCountRangeByFieldResult::new();
-                        result.count = count;
-                        result
-                    })
-                    .map_err(UserFacingError::InternalError)
-            },
-            |resp, r| {
-                resp.body = Some(match r {
-                    Ok(r) => proto::MapCountRangeByFieldResponse_oneof_body::result(r),
-                    Err(e) => proto::MapCountRangeByFieldResponse_oneof_body::error(e),
+                    Ok(r) => proto::WriteResponse_oneof_body::result(r),
+                    Err(e) => proto::WriteResponse_oneof_body::error(e),
                 })
             },
         )

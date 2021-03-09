@@ -4,13 +4,6 @@ import "common/rustproto.proto";
 
 option (rustproto.carllerche_bytes_for_bytes_all) = true;
 
-message Scalar {
-    oneof value {
-        bytes bytes = 1;
-        sint64 int = 2;
-    }
-}
-
 message Value {
     oneof value {
         bytes bytes = 1;
@@ -33,234 +26,106 @@ message Error {
     string message = 2;
 }
 
-message ClearPartitionsRequest {}
+message WriteExpressionClear {}
 
-message ClearPartitionsResult {}
-
-message ClearPartitionsResponse {
-    oneof body {
-        Error error = 1;
-        ClearPartitionsResult result = 2;
-    }
-}
-
-message GetRequest {
-    bytes key = 1;
-}
-
-message GetResult {
-    Value value = 1;
-}
-
-message GetResponse {
-    oneof body {
-        Error error = 1;
-        GetResult result = 2;
-    }
-}
-
-message DeleteRequest {
-    bytes key = 1;
-}
-
-message DeleteResult {
-    bool did_delete = 1;
-}
-
-message DeleteResponse {
-    oneof body {
-        Error error = 1;
-        DeleteResult result = 2;
-    }
-}
-
-message SetRequest {
+message WriteExpressionSet {
     message Condition {
         oneof condition {
             bool exists = 1;
-            Value equals = 2;
+            uint32 equals = 2;
         }
     }
 
-    bytes key = 1;
-    Value value = 2;
+    uint32 key = 1;
+    uint32 value = 2;
     Condition condition = 3;
 }
 
-message SetResult {
-    bool did_set = 1;
+message WriteExpressionSequence {
+    repeated WriteExpression exprs = 1;
 }
 
-message SetResponse {
+message WriteExpressionDelete {
+    uint32 key = 1;
+}
+
+message WriteExpression {
+    oneof expr {
+        WriteExpressionClear clear = 1;
+        WriteExpressionSet set = 2;
+        WriteExpressionSequence sequence = 3;
+        ReadExpression read = 4;
+        WriteExpressionDelete delete = 5;
+    }
+}
+
+message ReadExpressionGet {
+    uint32 key = 1;
+    uint32 dest = 2;
+}
+
+message ReadExpressionSequence {
+    repeated ReadExpression exprs = 1;
+}
+
+message ReadExpression {
+    oneof expr {
+        ReadExpressionGet get = 1;
+        ReadExpressionSequence sequence = 2;
+    }
+}
+
+message ReadTransaction {
+    repeated Value inputs = 1;
+    repeated uint32 outputs = 2;
+    ReadExpression expr = 3;
+}
+
+message WriteTransaction {
+    repeated Value inputs = 1;
+    repeated uint32 outputs = 2;
+    WriteExpression expr = 3;
+}
+
+message ReadRequest {
+    ReadTransaction tx = 1;
+}
+
+message ReadOutput {
+    Value value = 1;
+}
+
+message ReadResult {
+    repeated ReadOutput outputs = 1;
+}
+
+message ReadResponse {
     oneof body {
         Error error = 1;
-        SetResult result = 2;
+        ReadResult result = 2;
     }
 }
 
-message AppendRequest {
-    message Condition {
-        oneof condition {
-            bool contains_value = 1;
-        }
-    }
-
-    bytes key = 1;
-    repeated Value values = 2;
-    Condition condition = 3;
+message WriteRequest {
+    WriteTransaction tx = 1;
 }
 
-message AppendResult {}
+message WriteOutput {
+    Value value = 1;
+}
 
-message AppendResponse {
+message WriteResult {
+    repeated WriteOutput outputs = 1;
+}
+
+message WriteResponse {
     oneof body {
         Error error = 1;
-        AppendResult result = 2;
-    }
-}
-
-message FilterRequest {
-    message Predicate {
-        oneof predicate {
-            ValueArray not_in = 1;
-        }
-    }
-
-    bytes key = 1;
-    Predicate predicate = 2;
-}
-
-message FilterResult {}
-
-message FilterResponse {
-    oneof body {
-        Error error = 1;
-        FilterResult result = 2;
-    }
-}
-
-message MapSetRequest {
-    bytes key = 1;
-    Scalar field = 2;
-    Value value = 3;
-    Scalar order = 4;
-}
-
-message MapSetResult {}
-
-message MapSetResponse {
-    oneof body {
-        Error error = 1;
-        MapSetResult result = 2;
-    }
-}
-
-message MapDeleteRequest {
-    bytes key = 1;
-    Scalar field = 2;
-}
-
-message MapDeleteResult {
-    bool did_delete = 1;
-}
-
-message MapDeleteResponse {
-    oneof body {
-        Error error = 1;
-        MapDeleteResult result = 2;
-    }
-}
-
-message Bound {
-    oneof value {
-        Scalar included = 1;
-        Scalar excluded = 2;
-    }
-}
-
-message MapGetRangeRequest {
-    bytes key = 1;
-    Bound start = 2;
-    Bound end = 3;
-    bool reverse = 4;
-    uint64 limit = 5;
-}
-
-message MapGetRangeResult {
-    repeated Value values = 1;
-}
-
-message MapGetRangeResponse {
-    oneof body {
-        Error error = 1;
-        MapGetRangeResult result = 2;
-    }
-}
-
-message MapGetRangeByFieldRequest {
-    bytes key = 1;
-    Bound start = 2;
-    Bound end = 3;
-    bool reverse = 4;
-    uint64 limit = 5;
-}
-
-message MapGetRangeByFieldResult {
-    repeated Value values = 1;
-}
-
-message MapGetRangeByFieldResponse {
-    oneof body {
-        Error error = 1;
-        MapGetRangeByFieldResult result = 2;
-    }
-}
-
-message MapCountRangeRequest {
-    bytes key = 1;
-    Bound start = 2;
-    Bound end = 3;
-}
-
-message MapCountRangeResult {
-    uint64 count = 1;
-}
-
-message MapCountRangeResponse {
-    oneof body {
-        Error error = 1;
-        MapCountRangeResult result = 2;
-    }
-}
-
-message MapCountRangeByFieldRequest {
-    bytes key = 1;
-    Bound start = 2;
-    Bound end = 3;
-}
-
-message MapCountRangeByFieldResult {
-    uint64 count = 1;
-}
-
-message MapCountRangeByFieldResponse {
-    oneof body {
-        Error error = 1;
-        MapCountRangeByFieldResult result = 2;
+        WriteResult result = 2;
     }
 }
 
 service Service {
-    rpc clearPartitions(ClearPartitionsRequest) returns (ClearPartitionsResponse);
-    rpc get(GetRequest) returns (GetResponse);
-    rpc set(SetRequest) returns (SetResponse);
-    rpc delete(DeleteRequest) returns (DeleteResponse);
-    rpc append(AppendRequest) returns (AppendResponse);
-    rpc filter(FilterRequest) returns (FilterResponse);
-    rpc map_set(MapSetRequest) returns (MapSetResponse);
-    rpc map_delete(MapDeleteRequest) returns (MapDeleteResponse);
-    rpc map_get_range(MapGetRangeRequest) returns (MapGetRangeResponse);
-    rpc map_get_range_by_field(MapGetRangeByFieldRequest) returns (MapGetRangeByFieldResponse);
-    rpc map_count_range(MapCountRangeRequest) returns (MapCountRangeResponse);
-    rpc map_count_range_by_field(MapCountRangeByFieldRequest) returns (MapCountRangeByFieldResponse);
+    rpc read(ReadRequest) returns (ReadResponse);
+    rpc write(WriteRequest) returns (WriteResponse);
 }

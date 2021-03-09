@@ -1,14 +1,14 @@
-use super::partition::{self};
-use algorithms::{cache::Cache as InnerCache, indexed_b_tree};
+use super::storage::{self};
+use algorithms::{b_tree, cache::Cache as InnerCache};
+use bytes::Bytes;
 
 #[derive(Debug, Hash, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub struct Key {
-    pub partition: u32,
     pub offset: u64,
 }
 
-type Node = indexed_b_tree::NormalizedNode<partition::Value>;
-type Value = indexed_b_tree::Value<partition::Value>;
+type Node = b_tree::Node<Bytes, storage::Value>;
+type Value = storage::Value;
 
 pub enum Item {
     Node(Node),

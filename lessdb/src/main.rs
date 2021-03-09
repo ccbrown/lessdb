@@ -14,8 +14,8 @@ mod append_only_file;
 mod cache;
 mod client;
 mod node;
-mod partition;
 mod protos;
+mod storage;
 
 use node::Node;
 

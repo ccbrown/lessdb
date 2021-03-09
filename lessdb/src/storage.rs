@@ -2,61 +2,17 @@ use super::{
     append_only_file::{self, AppendOnlyFile},
     cache::{self, Cache},
 };
-use algorithms::{
-    b_tree::{self, Tree as BTree},
-    indexed_b_tree::{
-        self, Key as NormalizedKey, PrimaryKey as NormalizedPrimaryKey, Range,
-        SecondaryKey as NormalizedSecondaryKey,
-    },
-};
+use algorithms::b_tree::{self};
 use anyhow::{Context, Error, Result};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    convert::{TryFrom, TryInto},
+    convert::TryInto,
     io::{Read, Seek, SeekFrom},
-    ops::{Bound, RangeBounds},
     path::Path,
     sync::{Arc, Mutex},
 };
-
-pub const HASH_LENGTH: usize = 32;
-
-#[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hash(Bytes);
-
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-#[error("incorrect hash length")]
-pub struct IncorrectHashLengthError;
-
-impl TryFrom<Bytes> for Hash {
-    type Error = IncorrectHashLengthError;
-
-    fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
-        if bytes.len() != HASH_LENGTH {
-            Err(IncorrectHashLengthError)
-        } else {
-            Ok(Self(bytes))
-        }
-    }
-}
-
-impl AsRef<[u8]> for Hash {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-#[cfg(test)]
-impl From<&str> for Hash {
-    fn from(s: &str) -> Hash {
-        use digest::Digest;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(s.as_bytes());
-        Hash(hasher.finalize().to_vec().into())
-    }
-}
 
 #[derive(Clone, Debug, Ord, Hash, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scalar {
@@ -99,116 +55,12 @@ impl From<Scalar> for Value {
     }
 }
 
-#[derive(Clone, Debug, Ord, Hash, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Sort {
-    Min,
-    Scalar(Scalar),
-    Max,
-}
+type BTree = b_tree::Tree<Bytes, Value>;
+type BTreeNode = b_tree::Node<Bytes, Value>;
 
-impl Sort {
-    fn normalize(&self) -> Bytes {
-        match self {
-            Self::Min => vec![0].into(),
-            Self::Scalar(Scalar::Bytes(b)) => {
-                let mut buf = BytesMut::with_capacity(1 + b.len());
-                buf.put_u8(1);
-                buf.extend_from_slice(&b);
-                buf.freeze()
-            }
-            Self::Scalar(Scalar::Int(n)) => {
-                let mut buf = BytesMut::with_capacity(1 + 8);
-                buf.put_u8(2);
-                buf.extend_from_slice(&u64::to_be_bytes((*n as u64) ^ 0x8000000000000000));
-                buf.freeze()
-            }
-            Self::Max => vec![255].into(),
-        }
-    }
-}
-
-impl Into<Sort> for Scalar {
-    fn into(self) -> Sort {
-        Sort::Scalar(self)
-    }
-}
-
-#[cfg(test)]
-impl From<&str> for Sort {
-    fn from(s: &str) -> Sort {
-        Sort::Scalar(s.into())
-    }
-}
-
-type IBTree = indexed_b_tree::Tree<Value>;
-type IBTreeValue = indexed_b_tree::Value<Value>;
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Key {
-    pub primary: PrimaryKey,
-    pub secondary_sort: Option<Sort>,
-}
-
-impl Key {
-    fn normalize(&self) -> NormalizedKey {
-        NormalizedKey {
-            primary: self.primary.normalize(),
-            secondary_sort: self.secondary_sort.as_ref().map(|s| s.normalize()),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct PrimaryKey {
-    pub hash: Hash,
-    pub sort: Sort,
-}
-
-impl PrimaryKey {
-    fn normalize(&self) -> NormalizedPrimaryKey {
-        NormalizedPrimaryKey {
-            hash: self.hash.0.clone(),
-            sort: self.sort.normalize(),
-        }
-    }
-
-    fn normalize_bound(b: Bound<&Self>) -> Bound<NormalizedPrimaryKey> {
-        match b {
-            Bound::Unbounded => Bound::Unbounded,
-            Bound::Included(k) => Bound::Included(k.normalize()),
-            Bound::Excluded(k) => Bound::Excluded(k.normalize()),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SecondaryKey {
-    pub hash: Hash,
-    pub secondary_sort: Sort,
-    pub primary_sort: Sort,
-}
-
-impl SecondaryKey {
-    fn normalize(&self) -> NormalizedSecondaryKey {
-        NormalizedSecondaryKey {
-            hash: self.hash.0.clone(),
-            secondary_sort: self.secondary_sort.normalize(),
-            primary_sort: self.primary_sort.normalize(),
-        }
-    }
-
-    fn normalize_bound(b: Bound<&Self>) -> Bound<NormalizedSecondaryKey> {
-        match b {
-            Bound::Unbounded => Bound::Unbounded,
-            Bound::Included(k) => Bound::Included(k.normalize()),
-            Bound::Excluded(k) => Bound::Excluded(k.normalize()),
-        }
-    }
-}
-
-pub struct Partition {
+pub struct Storage {
     f: Arc<Mutex<AppendOnlyFile>>,
-    tree: IBTree,
+    tree: BTree,
     loader: Loader,
 }
 
@@ -235,8 +87,6 @@ pub enum NodeBody {
         values: Vec<u64>,
     },
 }
-
-type BTreeNode = b_tree::Node<Bytes, IBTreeValue>;
 
 impl Into<BTreeNode> for Node {
     fn into(self) -> BTreeNode {
@@ -281,11 +131,11 @@ impl Into<BTreeNode> for Node {
 
 pub struct Tree {
     loader: Loader,
-    inner: IBTree,
+    inner: BTree,
 }
 
 impl Tree {
-    fn into_inner(self) -> IBTree {
+    fn into_inner(self) -> BTree {
         self.inner
     }
 
@@ -294,80 +144,44 @@ impl Tree {
             self
         } else {
             Self {
-                inner: IBTree::new(),
+                inner: BTree::new(),
                 loader: self.loader,
             }
         })
     }
 
-    pub fn get(&self, key: &PrimaryKey) -> Result<Option<Value>> {
-        Ok(self.inner.get(&self.loader, &key.normalize())?)
-    }
-
-    pub fn get_range_by_primary_key<B: RangeBounds<PrimaryKey>>(
-        &self,
-        bounds: B,
-    ) -> Range<Value, Loader, (Bound<Bytes>, Bound<Bytes>)> {
-        self.inner.get_range_by_primary_key(
-            &self.loader,
-            (
-                PrimaryKey::normalize_bound(bounds.start_bound()),
-                PrimaryKey::normalize_bound(bounds.end_bound()),
-            ),
-        )
-    }
-
-    pub fn count_range_by_primary_key<B: RangeBounds<PrimaryKey>>(&self, bounds: B) -> Result<u64> {
-        self.inner.count_range_by_primary_key(
-            &self.loader,
-            (
-                PrimaryKey::normalize_bound(bounds.start_bound()),
-                PrimaryKey::normalize_bound(bounds.end_bound()),
-            ),
-        )
-    }
-
-    pub fn get_range_by_secondary_key<B: RangeBounds<SecondaryKey>>(
-        &self,
-        bounds: B,
-    ) -> Range<Value, Loader, (Bound<Bytes>, Bound<Bytes>)> {
-        self.inner.get_range_by_secondary_key(
-            &self.loader,
-            (
-                SecondaryKey::normalize_bound(bounds.start_bound()),
-                SecondaryKey::normalize_bound(bounds.end_bound()),
-            ),
-        )
-    }
-
-    pub fn count_range_by_secondary_key<B: RangeBounds<SecondaryKey>>(
-        &self,
-        bounds: B,
-    ) -> Result<u64> {
-        self.inner.count_range_by_secondary_key(
-            &self.loader,
-            (
-                SecondaryKey::normalize_bound(bounds.start_bound()),
-                SecondaryKey::normalize_bound(bounds.end_bound()),
-            ),
-        )
+    pub fn get(&self, key: &Bytes) -> Result<Option<Value>> {
+        Ok(self.inner.get(&self.loader, key)?)
     }
 
     pub fn insert<F: FnOnce(Option<&Value>) -> Option<Value>>(
-        self,
-        key: Key,
+        mut self,
+        key: Bytes,
         value: F,
     ) -> Result<Self> {
-        let mut loader = self.loader;
+        let (inner, _) =
+            match self
+                .inner
+                .insert_conditionally(&mut self.loader, key, |loader, prev| {
+                    let prev_value = match prev {
+                        Some(prev) => Some(prev.clone().load(loader)?),
+                        None => None,
+                    };
+                    Ok(value(prev_value.as_ref()))
+                })? {
+                Some(result) => result,
+                None => return Ok(self),
+            };
         Ok(Self {
-            inner: self.inner.insert(&mut loader, key.normalize(), value)?,
-            loader,
+            inner,
+            loader: self.loader,
         })
     }
 
-    pub fn delete(self, key: &PrimaryKey) -> Result<(Self, Option<Value>)> {
+    pub fn delete(self, key: &Bytes) -> Result<(Self, Option<Value>)> {
         let mut loader = self.loader;
-        let (inner, prev) = self.inner.delete(&mut loader, &key.normalize())?;
+        let (inner, prev) = self.inner.delete(&mut loader, key)?;
+        let prev = prev.map(|prev| prev.load(&loader)).transpose()?;
         Ok((Self { inner, loader }, prev))
     }
 }
@@ -375,61 +189,48 @@ impl Tree {
 #[derive(Clone)]
 pub struct Loader {
     f: Arc<Mutex<AppendOnlyFile>>,
-    partition: u32,
     cache: Arc<Cache>,
 }
 
-impl<'a> b_tree::Loader<Bytes, IBTreeValue> for Loader {
+impl<'a> b_tree::Loader<Bytes, Value> for Loader {
     type Error = Error;
 
-    fn load_node(&self, id: u64) -> Result<b_tree::Node<Bytes, IBTreeValue>, Self::Error> {
-        self.cache.get_node(
-            cache::Key {
-                partition: self.partition,
-                offset: id,
-            },
-            || {
-                let mut f = self.f.lock().expect("the lock should not be poisoned");
-                f.seek(SeekFrom::Start(id))
-                    .with_context(|| "unable to seek to primary node")?;
-                let node: Node = rmp_serde::from_read(&mut *f).with_context(|| {
-                    format!("unable to deserialize primary node at offset {}", id)
-                })?;
-                Ok(node.into())
-            },
-        )
+    fn load_node(&self, id: u64) -> Result<BTreeNode, Self::Error> {
+        self.cache.get_node(cache::Key { offset: id }, || {
+            let mut f = self.f.lock().expect("the lock should not be poisoned");
+            f.seek(SeekFrom::Start(id))
+                .with_context(|| "unable to seek to primary node")?;
+            let node: Node = rmp_serde::from_read(&mut *f)
+                .with_context(|| format!("unable to deserialize primary node at offset {}", id))?;
+            Ok(node.into())
+        })
     }
 
-    fn load_value(&self, id: u64) -> Result<IBTreeValue, Self::Error> {
-        self.cache.get_value(
-            cache::Key {
-                partition: self.partition,
-                offset: id,
-            },
-            || {
-                let mut f = self.f.lock().expect("the lock should not be poisoned");
-                f.seek(SeekFrom::Start(id))
-                    .with_context(|| "unable to seek to value")?;
-                Ok(rmp_serde::from_read(&mut *f)
-                    .with_context(|| format!("unable to deserialize value at offset {}", id))?)
-            },
-        )
+    fn load_value(&self, id: u64) -> Result<Value, Self::Error> {
+        self.cache.get_value(cache::Key { offset: id }, || {
+            let mut f = self.f.lock().expect("the lock should not be poisoned");
+            f.seek(SeekFrom::Start(id))
+                .with_context(|| "unable to seek to value")?;
+            Ok(rmp_serde::from_read(&mut *f)
+                .with_context(|| format!("unable to deserialize value at offset {}", id))?)
+        })
     }
 }
 
 struct SerializedTree {
-    tree: IBTree,
+    tree: BTree,
     data: Vec<u8>,
     cache_items: Vec<(u64, cache::Item)>,
 }
 
 enum SerializedNodeOrValue {
     Node(u64, BTreeNode),
-    Value(u64, IBTreeValue),
+    Value(u64, Value),
 }
 
-impl Partition {
-    pub fn open<P: AsRef<Path>>(path: P, number: u32, cache: Arc<Cache>) -> Result<Self> {
+impl Storage {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let cache = Arc::new(Cache::new());
         let mut f =
             AppendOnlyFile::open(path).with_context(|| "unable to open append-only file")?;
         let tree = match f.last_entry_offset() {
@@ -441,13 +242,12 @@ impl Partition {
                     .with_context(|| "unable to seek to latest entry")?;
                 Self::deserialize_tree(&mut f).with_context(|| "unable to deserialize tree")?
             }
-            None => IBTree::new(),
+            None => BTree::new(),
         };
         let f = Arc::new(Mutex::new(f));
         Ok(Self {
             loader: Loader {
                 f: f.clone(),
-                partition: number,
                 cache,
             },
             f,
@@ -455,49 +255,24 @@ impl Partition {
         })
     }
 
-    fn deserialize_tree<R: Read>(mut r: R) -> Result<IBTree> {
-        let mut buf = [0u8; 16];
+    fn deserialize_tree<R: Read>(mut r: R) -> Result<BTree> {
+        let mut buf = [0u8; 8];
         r.read_exact(&mut buf)
             .with_context(|| "error reading tree bytes")?;
-        Ok(IBTree {
-            primary_tree: BTree::Persisted {
-                id: u64::from_be_bytes((&buf[..8]).try_into().expect("we know this is 8 bytes")),
-            },
-            secondary_tree: BTree::Persisted {
-                id: u64::from_be_bytes((&buf[8..]).try_into().expect("we know this is 8 bytes")),
-            },
+        Ok(BTree::Persisted {
+            id: u64::from_be_bytes((buf.as_ref()).try_into().expect("we know this is 8 bytes")),
         })
     }
 
-    fn serialize_tree(tree: IBTree, offset: u64) -> Result<SerializedTree> {
-        let mut buf = vec![0; 16];
+    fn serialize_tree(tree: BTree, offset: u64) -> Result<SerializedTree> {
+        let mut buf = vec![0; 8];
         let mut value_ids = HashMap::new();
         let mut cache_items = Vec::new();
-        let primary_offset = Self::serialize_b_tree(
-            tree.primary_tree,
-            offset,
-            &mut buf,
-            &mut value_ids,
-            &mut cache_items,
-            0,
-        )?;
-        buf[..8].copy_from_slice(&primary_offset.to_be_bytes());
-        let secondary_offset = Self::serialize_b_tree(
-            tree.secondary_tree,
-            offset,
-            &mut buf,
-            &mut value_ids,
-            &mut cache_items,
-            0,
-        )?;
-        buf[8..16].copy_from_slice(&secondary_offset.to_be_bytes());
+        let offset =
+            Self::serialize_b_tree(tree, offset, &mut buf, &mut value_ids, &mut cache_items, 0)?;
+        buf[..8].copy_from_slice(&offset.to_be_bytes());
         Ok(SerializedTree {
-            tree: IBTree {
-                primary_tree: BTree::Persisted { id: primary_offset },
-                secondary_tree: BTree::Persisted {
-                    id: secondary_offset,
-                },
-            },
+            tree: BTree::Persisted { id: offset },
             data: buf,
             cache_items: cache_items
                 .into_iter()
@@ -529,10 +304,10 @@ impl Partition {
     }
 
     fn serialize_b_tree(
-        tree: BTree<Bytes, IBTreeValue>,
+        tree: BTree,
         dest_offset: u64,
         dest: &mut Vec<u8>,
-        mut value_ids: &mut HashMap<IBTreeValue, u64>,
+        mut value_ids: &mut HashMap<Value, u64>,
         mut cache_items: &mut Vec<SerializedNodeOrValue>,
         depth: u64,
     ) -> Result<u64> {
@@ -632,10 +407,10 @@ impl Partition {
     }
 
     fn serialize_b_tree_value(
-        value: b_tree::Value<IBTreeValue>,
+        value: b_tree::Value<Value>,
         dest_offset: u64,
         dest: &mut Vec<u8>,
-        value_ids: &mut HashMap<IBTreeValue, u64>,
+        value_ids: &mut HashMap<Value, u64>,
         cache_items: &mut Vec<SerializedNodeOrValue>,
     ) -> Result<u64> {
         Ok(match value {
@@ -662,11 +437,14 @@ impl Partition {
     }
 
     /// Makes a modification to the tree and commits it to disk.
-    pub fn commit<F: FnOnce(Tree) -> Result<Tree>>(&mut self, f: F) -> Result<()> {
-        let tree = f(Tree {
+    pub fn commit<F: FnOnce(Tree) -> Result<Option<Tree>>>(&mut self, f: F) -> Result<()> {
+        let tree = match f(Tree {
             loader: self.loader.clone(),
             inner: self.tree.clone(),
-        })?;
+        })? {
+            Some(tree) => tree,
+            None => return Ok(()),
+        };
         let tree = tree.into_inner();
         if !tree.is_persisted() {
             let mut f = self.f.lock().expect("the lock should not be poisoned");
@@ -680,13 +458,7 @@ impl Partition {
                 .with_context(|| "unable to append tree to append-only file")?;
             self.tree = tree.tree;
             for (offset, item) in tree.cache_items.into_iter() {
-                self.loader.cache.insert(
-                    cache::Key {
-                        partition: self.loader.partition,
-                        offset,
-                    },
-                    item,
-                )
+                self.loader.cache.insert(cache::Key { offset }, item)
             }
         }
         Ok(())
@@ -699,94 +471,50 @@ mod tests {
     use bytes::BytesMut;
     use tempdir::TempDir;
 
-    fn primary_key(hash: &'static str, sort: &'static str) -> PrimaryKey {
-        PrimaryKey {
-            hash: hash.into(),
-            sort: sort.into(),
-        }
-    }
-
-    fn key(hash: &'static str, sort: &'static str, sort2: Option<&'static str>) -> Key {
-        Key {
-            primary: primary_key(hash, sort),
-            secondary_sort: sort2.map(|sort| sort.into()),
-        }
+    fn key(s: &'static str) -> Bytes {
+        s.as_bytes().into()
     }
 
     #[test]
-    fn test_partition() {
-        let dir = TempDir::new("partition-test").unwrap();
-        let path = dir.path().join("partition");
+    fn test_storage() {
+        let dir = TempDir::new("storage-test").unwrap();
+        let path = dir.path().join("storage");
 
-        // write to the partition
+        // write to the storage
         {
-            let mut partition = Partition::open(&path, 0, Arc::new(Cache::new())).unwrap();
+            let mut storage = Storage::open(&path).unwrap();
 
-            partition
+            storage
                 .commit(|tree| {
-                    tree.insert(key("foo", "a", None), |_| Some(Value::Bytes("bar".into())))
+                    Some(tree.insert(key("foo"), |_| Some(Value::Bytes("bar".into())))).transpose()
                 })
                 .unwrap();
 
             assert_eq!(
-                partition.tree().get(&primary_key("foo", "a")).unwrap(),
+                storage.tree().get(&key("foo")).unwrap(),
                 Some(Value::Bytes("bar".into()))
             );
         }
 
         // make sure the data is still there
         {
-            let partition = Partition::open(&path, 0, Arc::new(Cache::new())).unwrap();
+            let storage = Storage::open(&path).unwrap();
 
             assert_eq!(
-                partition.tree().get(&primary_key("foo", "a")).unwrap(),
+                storage.tree().get(&key("foo")).unwrap(),
                 Some(Value::Bytes("bar".into()))
             );
         }
     }
 
-    // When we insert a value with a secondary sort key, it gets inserted into both trees. Let's
-    // make sure we're not actually writing that value to the file twice though.
+    // Let's make sure the storage is a reasonable size after our writes.
     #[test]
-    fn test_partition_value_deduplication() {
-        let dir = TempDir::new("partition-test").unwrap();
-        let path = dir.path().join("partition");
+    fn test_storage_size() {
+        let dir = TempDir::new("storage-test").unwrap();
+        let path = dir.path().join("storage");
 
         {
-            let mut partition = Partition::open(&path, 0, Arc::new(Cache::new())).unwrap();
-            partition
-                .commit(|tree| {
-                    tree.insert(key("foo", "1", Some("2")), |_| {
-                        Some(Value::Bytes("dedupme".into()))
-                    })
-                })
-                .unwrap();
-        }
-
-        let mut f = std::fs::File::open(path).unwrap();
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf).unwrap();
-
-        assert_eq!(
-            buf.windows(7)
-                .filter(|b| *b == "dedupme".as_bytes())
-                .count(),
-            1
-        );
-    }
-
-    // Let's make sure the partition is a reasonable size after our writes.
-    #[test]
-    fn test_partition_size() {
-        let dir = TempDir::new("partition-test").unwrap();
-        let path = dir.path().join("partition");
-
-        {
-            let mut partition = Partition::open(&path, 0, Arc::new(Cache::new())).unwrap();
-
-            let mut hash = BytesMut::new();
-            hash.resize(32, 0x11);
-            let hash: Hash = hash.freeze().try_into().unwrap();
+            let mut storage = Storage::open(&path).unwrap();
 
             let mut value = BytesMut::new();
             value.resize(128, 0x22);
@@ -795,29 +523,13 @@ mod tests {
             for i in 0u32..200 {
                 let i_bytes = i.to_be_bytes();
 
-                let mut sort = BytesMut::new();
-                sort.resize(32, 0x33);
-                sort.extend_from_slice(&i_bytes);
-                let sort: Scalar = sort.freeze().try_into().unwrap();
+                let mut key = BytesMut::new();
+                key.resize(32, 0x33);
+                key.extend_from_slice(&i_bytes);
+                let key = key.freeze();
 
-                let mut secondary_sort = BytesMut::new();
-                secondary_sort.resize(32, 0x44);
-                secondary_sort.extend_from_slice(&i_bytes);
-                let secondary_sort: Scalar = secondary_sort.freeze().try_into().unwrap();
-
-                partition
-                    .commit(|tree| {
-                        tree.insert(
-                            Key {
-                                primary: PrimaryKey {
-                                    hash: hash.clone(),
-                                    sort: Sort::Scalar(sort),
-                                },
-                                secondary_sort: Some(Sort::Scalar(secondary_sort)),
-                            },
-                            |_| Some(value.clone()),
-                        )
-                    })
+                storage
+                    .commit(|tree| Some(tree.insert(key, |_| Some(value.clone()))).transpose())
                     .unwrap();
             }
         }
@@ -825,7 +537,7 @@ mod tests {
         let f = AppendOnlyFile::open(path).unwrap();
         assert_eq!(
             f.size(),
-            268872,
+            90109,
             "last entry size = {}",
             f.size() - f.last_entry_offset().unwrap()
         );
